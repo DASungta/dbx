@@ -73,7 +73,7 @@ import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorP
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseSchemaQualifier, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
-import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
@@ -157,6 +157,10 @@ const settingsStore = useSettingsStore();
 const { isDark, themePalette } = useTheme();
 const { t } = useI18n();
 const { toast } = useToast();
+const snippetDatabaseType = computed(() => {
+  const connection = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
+  return sqlSnippetDatabaseTypeForConnection(connection) ?? props.databaseType;
+});
 
 const SQL_FUNCTION_NAMES = [
   "COUNT",
@@ -2491,7 +2495,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         translations: completionTranslations.value,
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
-        databaseType: props.databaseType,
+        databaseType: snippetDatabaseType.value,
         currentSchema: props.schema,
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
@@ -2511,7 +2515,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         translations: completionTranslations.value,
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
-        databaseType: props.databaseType,
+        databaseType: snippetDatabaseType.value,
         currentSchema: props.schema,
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
@@ -2705,7 +2709,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     translations: completionTranslations.value,
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
-    databaseType: props.databaseType,
+    databaseType: snippetDatabaseType.value,
     currentSchema: props.schema,
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
@@ -3113,7 +3117,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     translations: completionTranslations.value,
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
-    databaseType: props.databaseType,
+    databaseType: snippetDatabaseType.value,
     currentSchema: props.schema,
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,

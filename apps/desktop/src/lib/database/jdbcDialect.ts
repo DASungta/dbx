@@ -53,6 +53,13 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
+export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
+  // ASE uses T-SQL snippets, but mapping it globally to SQL Server would also
+  // enable incompatible SQL Server metadata and pagination behavior.
+  if (isJdbcAseProfile(connection)) return "sqlserver";
+  return effectiveDatabaseTypeForConnection(connection);
+}
+
 export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection) return undefined;
   if (connection.db_type === "gbase" && !isGbase8sProfile(connection.driver_profile)) return "gbase";
@@ -113,11 +120,14 @@ export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" 
 }
 
 export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): "mysql" | "postgres" | "sqlserver" {
-  if (connection?.db_type === "jdbc") {
-    const explicitIdentity = [connection.driver_profile, connection.driver_label, connection.database_info?.productName].filter(Boolean).join("\n");
-    if (JDBC_ASE_PROFILE_PATTERNS.some((pattern) => pattern.test(explicitIdentity))) return "sqlserver";
-  }
+  if (isJdbcAseProfile(connection)) return "sqlserver";
   return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connection));
+}
+
+function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {
+  if (connection?.db_type !== "jdbc") return false;
+  const explicitIdentity = [connection.driver_profile, connection.driver_label, connection.database_info?.productName].filter(Boolean).join("\n");
+  return JDBC_ASE_PROFILE_PATTERNS.some((pattern) => pattern.test(explicitIdentity));
 }
 
 function isGbase8sProfile(driverProfile?: string): boolean {

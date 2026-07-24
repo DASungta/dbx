@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
+import { codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, inferJdbcDialect, sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 test("infers GoldenDB for generic JDBC connections", () => {
   assert.equal(
@@ -38,6 +38,7 @@ test("uses SQL Server editor syntax for ASE without changing its effective JDBC 
 
   for (const connection of aseConnections) {
     assert.equal(codeMirrorSqlDialectForConnection(connection), "sqlserver");
+    assert.equal(sqlSnippetDatabaseTypeForConnection(connection), "sqlserver");
     assert.equal(effectiveDatabaseTypeForConnection(connection), "jdbc");
   }
 });
@@ -54,5 +55,6 @@ test("keeps non-ASE jConnect profiles on generic JDBC syntax", () => {
   };
 
   assert.equal(codeMirrorSqlDialectForConnection(iqConnection), "mysql");
+  assert.equal(sqlSnippetDatabaseTypeForConnection(iqConnection), "jdbc");
   assert.equal(effectiveDatabaseTypeForConnection(iqConnection), "jdbc");
 });
