@@ -3,6 +3,9 @@ import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { buildMongoCompletionItemsFromContext, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { CLOUDFLARE_D1_COMMON_FUNCTION_NAMES } from "@/lib/sql/cloudflareD1";
 import type { SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
+import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
+
+export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
 const SQL_KEYWORDS = [
   "SELECT",
@@ -778,119 +781,6 @@ function getFunctionDescriptions(t?: SqlCompletionTranslations): Map<string, str
   ]);
 }
 
-export const DEFAULT_SQL_SNIPPETS: SqlSnippet[] = [
-  {
-    id: "builtin-sel",
-    label: "select *",
-    prefix: "sel",
-    body: "SELECT *\nFROM table\nLIMIT 100;",
-    enabled: true,
-  },
-  {
-    id: "builtin-ins",
-    label: "insert into",
-    prefix: "ins",
-    body: "INSERT INTO table (columns)\nVALUES (values);",
-    enabled: true,
-  },
-  {
-    id: "builtin-upd",
-    label: "update set",
-    prefix: "upd",
-    body: "UPDATE table\nSET column = value\nWHERE condition;",
-    enabled: true,
-  },
-  {
-    id: "builtin-cte",
-    label: "common table expression",
-    prefix: "cte",
-    body: "WITH name AS (\n  SELECT columns\n  FROM table\n)\nSELECT *\nFROM name;",
-    enabled: true,
-  },
-  {
-    id: "builtin-join",
-    label: "join",
-    prefix: "join",
-    body: "JOIN table ON left_column = right_column",
-    enabled: true,
-  },
-  {
-    id: "builtin-case",
-    label: "case when",
-    prefix: "case",
-    body: "CASE\n  WHEN condition THEN value\n  ELSE default\nEND",
-    enabled: true,
-  },
-  {
-    id: "builtin-ct",
-    label: "create table",
-    prefix: "ct",
-    body: "CREATE TABLE table (\n  column type\n);",
-    enabled: true,
-  },
-  {
-    id: "builtin-ex",
-    label: "exists",
-    prefix: "ex",
-    body: "EXISTS (\n  SELECT 1\n  FROM table\n  WHERE condition\n)",
-    enabled: true,
-  },
-  {
-    id: "builtin-nex",
-    label: "not exists",
-    prefix: "nex",
-    body: "NOT EXISTS (\n  SELECT 1\n  FROM table\n  WHERE condition\n)",
-    enabled: true,
-  },
-  {
-    id: "builtin-at",
-    label: "alter table add column",
-    prefix: "at",
-    body: "ALTER TABLE table\nADD COLUMN column type;",
-    enabled: true,
-  },
-  {
-    id: "builtin-ci",
-    label: "create index",
-    prefix: "ci",
-    body: "CREATE INDEX idx_name\nON table (column);",
-    enabled: true,
-  },
-];
-
-const MANTICORESEARCH_SQL_SNIPPETS: SqlSnippet[] = [
-  {
-    id: "builtin-manticore-match",
-    label: "match query",
-    prefix: "match",
-    body: "MATCH('query')",
-  },
-  {
-    id: "builtin-manticore-facet",
-    label: "facet",
-    prefix: "facet",
-    body: "FACET column",
-  },
-  {
-    id: "builtin-manticore-show-meta",
-    label: "show meta",
-    prefix: "m",
-    body: "SHOW META;",
-  },
-  {
-    id: "builtin-manticore-show-tables",
-    label: "show tables",
-    prefix: "tab",
-    body: "SHOW TABLES;",
-  },
-  {
-    id: "builtin-manticore-call-pq",
-    label: "call pq",
-    prefix: "p",
-    body: "CALL PQ ('pq', ('{\"title\":\"query\"}'));",
-  },
-];
-
 const SQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   // Aggregate
   ["COUNT", ["expression"]],
@@ -1445,7 +1335,7 @@ class SqlCompletionProvider {
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
       if (!preferReferencedColumns) {
-        this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase));
+        this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase, this.databaseType));
       }
       if (!preferReferencedColumns || context.suggestRoutines) {
         const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType);
@@ -1462,6 +1352,7 @@ class SqlCompletionProvider {
           context.prefix,
           MANTICORESEARCH_SQL_SNIPPETS.filter((snippet) => snippet.id === "builtin-manticore-call-pq"),
           this.input.keywordCase,
+          this.databaseType,
         ),
       );
     }
@@ -3249,9 +3140,9 @@ function applyBuiltinSnippetKeywordCase(snippet: SqlSnippet, text: string, keywo
 
 const BUILTIN_SNIPPET_PLACEHOLDER_RE = /\b(idx_name|left_column|right_column|columns|values|condition|column|default|value|name|type|table)\b/g;
 
-function applyBuiltinSnippetPlaceholders(snippet: SqlSnippet): string {
-  if (!shouldFormatBuiltinSnippet(snippet)) return snippet.body;
-  return snippet.body.replace(BUILTIN_SNIPPET_PLACEHOLDER_RE, (match) => `\${${match}}`);
+function applyBuiltinSnippetPlaceholders(snippet: SqlSnippet, body = snippet.body): string {
+  if (!shouldFormatBuiltinSnippet(snippet)) return body;
+  return body.replace(BUILTIN_SNIPPET_PLACEHOLDER_RE, (match) => `\${${match}}`);
 }
 
 function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
@@ -4107,11 +3998,11 @@ function singularTableName(name: string): string {
   return lower;
 }
 
-export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
-  return buildSnippetItems(prefix, snippets, keywordCase);
+export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType): SqlCompletionItem[] {
+  return buildSnippetItems(prefix, snippets, keywordCase, databaseType);
 }
 
-function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType): SqlCompletionItem[] {
   if (!prefix) return [];
   return snippets
     .filter((snippet) => {
@@ -4130,8 +4021,9 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       const baseBoost = matchesByPrefix ? 4000 : 0;
       // Placeholder replacement runs on the original (UPPER-case) body first,
       // then keyword casing is applied to both variants uniformly.
-      const body = applyBuiltinSnippetKeywordCase(snippet, snippet.body, keywordCase);
-      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet), keywordCase);
+      const resolvedBody = resolveSqlSnippetBodyForDatabase(snippet, databaseType);
+      const body = applyBuiltinSnippetKeywordCase(snippet, resolvedBody, keywordCase);
+      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase);
       return {
         label: snippet.label,
         type: "snippet" as const,
