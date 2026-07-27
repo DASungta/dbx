@@ -170,6 +170,29 @@ describe("useSqlExecution", () => {
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { openInNewResultTab: true });
   });
 
+  it("does not record or refresh when a new-result execution restores the prior run", async () => {
+    const result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), result });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockResolvedValue(false);
+    const addHistory = vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const refreshObjects = vi.spyOn(useConnectionStore(), "refreshObjectListTreeNode").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => "CREATE TABLE users (id INT)"),
+      activeOutputView,
+    });
+
+    await execution.tryExecuteInNewResultTab();
+
+    expect(addHistory).not.toHaveBeenCalled();
+    expect(refreshObjects).not.toHaveBeenCalled();
+  });
+
   it("keeps the new-result-tab intent through SQL parameter input", async () => {
     const sql = "SELECT * FROM users WHERE id = :id";
     const resolvedSql = "SELECT * FROM users WHERE id = 7";
@@ -404,6 +427,37 @@ describe("useSqlExecution", () => {
     await execution.onDangerConfirm();
 
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { openInNewResultTab: true });
+  });
+
+  it("keeps the active retained result when a new-result dangerous prompt is cancelled", async () => {
+    const result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    const activeTab = ref<QueryTab | undefined>({
+      ...queryTab("app"),
+      result,
+      resultRuns: [{ id: "run-1", title: "Run 1", sequence: 1, sql: "SELECT 1", createdAt: 1, result }],
+      activeResultRunId: "run-1",
+    });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql");
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => "DROP TABLE users"),
+      activeOutputView,
+    });
+
+    await execution.tryExecuteInNewResultTab();
+    expect(execution.showDangerDialog.value).toBe(true);
+
+    execution.showDangerDialog.value = false;
+    await Promise.resolve();
+
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(activeTab.value?.activeResultRunId).toBe("run-1");
+    expect(activeTab.value?.result).toEqual(result);
   });
 
   it("keeps the new-result-tab intent through Redis command confirmation", async () => {

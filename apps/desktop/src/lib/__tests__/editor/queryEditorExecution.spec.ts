@@ -15,6 +15,7 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain('emit("executeInNewResultTab", source)');
     expect(queryEditorSource).toContain("requestExecute({ bypassPicker: true, openInNewResultTab: true })");
     expect(contentAreaSource).toContain('const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs")');
+    expect(contentAreaSource).toContain("!!props.activeTab.resultRuns?.length");
     expect(contentAreaSource).toContain('role="tablist" :aria-label="t(\'tabs.resultRuns\')"');
   });
 

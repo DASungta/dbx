@@ -329,7 +329,15 @@ const activeQueryError = computed(() => {
 });
 const hasQueryOutput = computed(
   () =>
-    !!props.activeTab.result || props.activeTab.resultEvicted === true || !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true,
+    !!props.activeTab.result ||
+    !!props.activeTab.resultRuns?.length ||
+    props.activeTab.resultEvicted === true ||
+    !!props.activeTab.explainPlan ||
+    !!props.activeTab.explainError ||
+    !!props.activeTab.explainTableResult ||
+    !!props.activeTab.explainTableError ||
+    props.activeTab.isExecuting === true ||
+    props.activeTab.isExplaining === true,
 );
 const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined)));
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));

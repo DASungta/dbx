@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   analyzeEditableQueryEditability: vi.fn(),
+  cancelQuery: vi.fn(),
   closeClientConnectionSession: vi.fn(),
   closeQuerySession: vi.fn(),
+  ensureConnected: vi.fn(),
   executeMulti: vi.fn(),
   getConnectionConfig: vi.fn(),
   prepareQueryPaginationExecutionPlan: vi.fn(),
@@ -14,6 +16,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => ({
   analyzeEditableQueryEditability: mocks.analyzeEditableQueryEditability,
+  cancelQuery: mocks.cancelQuery,
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
   executeMulti: mocks.executeMulti,
@@ -23,7 +26,7 @@ vi.mock("@/lib/backend/api", () => ({
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
-    ensureConnected: vi.fn().mockResolvedValue(undefined),
+    ensureConnected: mocks.ensureConnected,
     getConfig: mocks.getConnectionConfig,
     recordConnectionLostError: vi.fn(),
   }),
@@ -59,6 +62,16 @@ function installLocalStorage() {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("queryStore multi-statement errors", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -66,6 +79,8 @@ describe("queryStore multi-statement errors", () => {
     mocks.tabResultSnapshots.clear();
     installLocalStorage();
     setActivePinia(createPinia());
+    mocks.cancelQuery.mockResolvedValue(true);
+    mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.getConnectionConfig.mockReturnValue({
       id: "mysql-1",
       name: "MySQL",
@@ -321,5 +336,130 @@ describe("queryStore multi-statement errors", () => {
       sql: "SELECT 3 AS value",
       result: { rows: [[3]] },
     });
+  });
+
+  it("keeps ordinary executions in the single-result path by default", async () => {
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeCurrentSql("SELECT 1 AS value");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[1]]);
+    expect(tab.resultRuns).toBeUndefined();
+    expect(tab.activeResultRunId).toBeUndefined();
+  });
+
+  it("restores the retained result when a new-result execution fails before dispatch", async () => {
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value");
+    mocks.ensureConnected.mockRejectedValueOnce(new Error("connection failed"));
+
+    await store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.resultRuns).toHaveLength(1);
+    expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("hydrates a restored active run before starting a new-result execution", async () => {
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    store.toggleResultAutoSave(tabId);
+    const run = tab.resultRuns?.[0];
+    expect(run?.resultCacheKey).toBeTruthy();
+    run!.result = undefined;
+    run!.results = undefined;
+    tab.result = undefined;
+    tab.results = undefined;
+    mocks.ensureConnected.mockRejectedValueOnce(new Error("connection failed"));
+
+    await store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+
+    expect(tab.resultRuns).toHaveLength(1);
+    expect(tab.activeResultRunId).toBe(run?.id);
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("restores the retained result when a new-result execution returns no result", async () => {
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockResolvedValueOnce([]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value");
+
+    await store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.resultRuns).toHaveLength(1);
+    expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("restores the retained result when a new-result execution is cancelled", async () => {
+    const pendingExecution = deferred<never>();
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value");
+
+    const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    await expect(store.cancelTabExecution(tabId)).resolves.toBe(true);
+    pendingExecution.reject(new Error("Query canceled"));
+    await execution;
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.resultRuns).toHaveLength(1);
+    expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("keeps the retained result when a cancelled execution still returns data", async () => {
+    const pendingExecution = deferred<Array<{ columns: string[]; rows: number[][]; affected_rows: number; execution_time_ms: number }>>();
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value");
+
+    const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    await expect(store.cancelTabExecution(tabId)).resolves.toBe(true);
+    pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
+    await execution;
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.resultRuns).toHaveLength(1);
+    expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("restores the adjacent retained result after closing the active run", async () => {
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockResolvedValueOnce([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value");
+    await store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const activeRunId = tab.activeResultRunId!;
+
+    expect(await store.removeResultRun(tabId, activeRunId)).toBe(true);
+
+    expect(tab.resultRuns).toHaveLength(1);
+    expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
+    expect(tab.result?.rows).toEqual([[1]]);
   });
 });

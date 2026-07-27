@@ -222,11 +222,12 @@ export function useSqlExecution(deps: {
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
-    await queryStore.executeCurrentSql(sql, {
+    const producedResult = await queryStore.executeCurrentSql(sql, {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
     });
+    if (producedResult === false) return;
     if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }
