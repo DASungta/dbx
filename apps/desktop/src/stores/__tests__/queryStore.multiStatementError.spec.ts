@@ -389,6 +389,41 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.resultRuns).toHaveLength(1);
     expect(tab.activeResultRunId).toBe(run?.id);
     expect(tab.result?.rows).toEqual([[1]]);
+    expect(mocks.tabResultSnapshots.has(run!.resultCacheKey!)).toBe(true);
+
+    run!.result = undefined;
+    run!.results = undefined;
+    tab.result = undefined;
+    tab.results = undefined;
+
+    expect(await store.setActiveResultRun(tabId, run!.id)).toBe(true);
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("captures a new run when another retained run is selected during execution", async () => {
+    const pendingExecution = deferred<Array<{ columns: string[]; rows: number[][]; affected_rows: number; execution_time_ms: number }>>();
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value");
+    store.toggleResultAutoSave(tabId);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const retainedRunId = tab.activeResultRunId!;
+    const retainedRunCacheKey = tab.resultRuns?.find((run) => run.id === retainedRunId)?.resultCacheKey;
+
+    const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    expect(await store.setActiveResultRun(tabId, retainedRunId)).toBe(true);
+    pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
+    await execution;
+
+    expect(tab.resultRuns).toHaveLength(2);
+    expect(tab.activeResultRunId).not.toBe(retainedRunId);
+    expect(tab.result).toMatchObject({ rows: [[2]] });
+    expect(tab.resultRuns?.find((run) => run.id === tab.activeResultRunId)?.resultCacheKey).not.toBe(retainedRunCacheKey);
+    expect(await store.setActiveResultRun(tabId, retainedRunId)).toBe(true);
+    expect(tab.result).toMatchObject({ rows: [[1]] });
   });
 
   it("restores the retained result when a new-result execution returns no result", async () => {

@@ -598,7 +598,7 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function clearResultPayload(tab: QueryTab, options: { evicted?: boolean } = {}) {
+  function clearResultPayload(tab: QueryTab, options: { evicted?: boolean; preserveCacheSnapshot?: boolean } = {}) {
     tab.result = undefined;
     tab.results = undefined;
     tab.activeResultIndex = undefined;
@@ -618,7 +618,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEvicted = options.evicted ? true : undefined;
     tab.resultCacheState = options.evicted ? tab.resultCacheState : undefined;
     if (!options.evicted) {
-      if (tab.resultCacheKey) void deleteTabResultSnapshot(tab.resultCacheKey);
+      if (tab.resultCacheKey && !options.preserveCacheSnapshot) void deleteTabResultSnapshot(tab.resultCacheKey);
       tab.resultCacheKey = undefined;
     }
   }
@@ -804,7 +804,7 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function captureDisplayedResultRun(tab: QueryTab, sql: string, createdAt = Date.now()) {
+  function captureDisplayedResultRun(tab: QueryTab, sql: string, createdAt = Date.now(), options: { reuseResultCacheKey?: boolean } = {}) {
     if (tab.mode !== "query" || !tab.result) return;
     const sequence = nextResultRunSequence(tab);
     const run: NonNullable<QueryTab["resultRuns"]>[number] = {
@@ -836,7 +836,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSessionId: tab.resultSessionId,
       resultAccessedAt: tab.resultAccessedAt,
       resultEstimatedBytes: tab.resultEstimatedBytes,
-      resultCacheKey: tab.resultCacheKey,
+      resultCacheKey: options.reuseResultCacheKey === false ? undefined : tab.resultCacheKey,
       resultCacheState: tab.resultCacheState,
       resultEvicted: tab.resultEvicted,
       queryAnalysis: tab.queryAnalysis,
@@ -848,6 +848,10 @@ export const useQueryStore = defineStore("query", () => {
     void persistResultRun(tab, run);
     tab.resultRuns = [...(tab.resultRuns ?? []), run];
     tab.activeResultRunId = run.id;
+    if (options.reuseResultCacheKey === false) {
+      tab.resultCacheKey = run.resultCacheKey;
+      tab.resultCacheState = run.resultCacheState;
+    }
     evictInactiveResultRunPayloads(tab);
   }
 
@@ -906,9 +910,11 @@ export const useQueryStore = defineStore("query", () => {
 
   function syncDisplayedResultRun(tab: QueryTab, sql: string, captureNewRun = false) {
     if (tab.mode !== "query" || !tab.result) return;
-    if (tab.activeResultRunId) {
+    if (captureNewRun) {
+      captureDisplayedResultRun(tab, sql, Date.now(), { reuseResultCacheKey: false });
+    } else if (tab.activeResultRunId) {
       syncActiveResultRunFromDisplayed(tab, sql);
-    } else if (captureNewRun || tab.resultAutoSave) {
+    } else if (tab.resultAutoSave) {
       captureDisplayedResultRun(tab, sql);
     }
   }
@@ -3043,7 +3049,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultTotalRowCountLoading = false;
     const previousResultSessionClose = closeResultSession(tab, options?.pagination?.sessionId);
     if (!preserveResultDuringExecution || !tab.result) {
-      clearResultPayload(tab);
+      clearResultPayload(tab, { preserveCacheSnapshot: openInNewResultTab && pendingResultRunRestores.has(executionId) });
     }
     queryExecutionLog("info", "start", {
       traceId,
