@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getConnectionConfig: vi.fn(),
   prepareQueryPaginationExecutionPlan: vi.fn(),
   saveOpenTabsState: vi.fn(),
+  tabResultSnapshots: new Map<string, unknown>(),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -34,6 +35,21 @@ vi.mock("@/stores/settingsStore", () => ({
   }),
 }));
 
+vi.mock("@/lib/tabs/tabResultCache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tabs/tabResultCache")>();
+  return {
+    ...actual,
+    writeTabResultSnapshot: vi.fn(async (key: string, snapshot: unknown) => {
+      mocks.tabResultSnapshots.set(key, actual.decodeTabResultSnapshot(actual.encodeTabResultSnapshot(snapshot as Parameters<typeof actual.encodeTabResultSnapshot>[0])));
+      return true;
+    }),
+    readTabResultSnapshot: vi.fn(async (key: string) => mocks.tabResultSnapshots.get(key)),
+    deleteTabResultSnapshot: vi.fn(async (key: string) => {
+      mocks.tabResultSnapshots.delete(key);
+    }),
+  };
+});
+
 function installLocalStorage() {
   const data = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -47,6 +63,7 @@ describe("queryStore multi-statement errors", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+    mocks.tabResultSnapshots.clear();
     installLocalStorage();
     setActivePinia(createPinia());
     mocks.getConnectionConfig.mockReturnValue({
@@ -269,5 +286,40 @@ describe("queryStore multi-statement errors", () => {
     await store.executeTabSql(tabId, "SELECT 1");
 
     expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT 1", undefined, expect.any(String), expect.objectContaining({ continueOnError: false }));
+  });
+
+  it("keeps old and new executions as result runs, then lets normal execution replace the active run", async () => {
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }])
+      .mockResolvedValueOnce([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }])
+      .mockResolvedValueOnce([{ columns: ["value"], rows: [[3]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeCurrentSql("SELECT 1 AS value");
+    await store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.resultAutoSave).toBeUndefined();
+    expect(tab.resultRuns).toHaveLength(2);
+    expect(tab.activeResultRunId).toBe(tab.resultRuns?.[1]?.id);
+
+    expect(await store.setActiveResultRun(tabId, tab.resultRuns![0]!.id)).toBe(true);
+    expect(tab.result?.rows[0]?.[0]).toBe(1);
+    expect(await store.setActiveResultRun(tabId, tab.resultRuns![1]!.id)).toBe(true);
+    expect(tab.result?.rows[0]?.[0]).toBe(2);
+
+    await store.executeCurrentSql("SELECT 3 AS value");
+
+    expect(tab.resultRuns).toHaveLength(2);
+    expect(tab.activeResultRunId).toBe(tab.resultRuns?.[1]?.id);
+    expect(await store.setActiveResultRun(tabId, tab.resultRuns![0]!.id)).toBe(true);
+    expect(tab.result?.rows[0]?.[0]).toBe(1);
+    expect(await store.setActiveResultRun(tabId, tab.resultRuns![1]!.id)).toBe(true);
+    expect(tab.resultRuns?.[1]).toMatchObject({
+      sql: "SELECT 3 AS value",
+      result: { rows: [[3]] },
+    });
   });
 });

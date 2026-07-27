@@ -147,6 +147,58 @@ describe("useSqlExecution", () => {
     expect(executeCurrentSql).toHaveBeenCalledWith(selectedSql, { sourceOffset: selectionFrom });
   });
 
+  it("forwards execute-in-new-result-tab intent to the query store", async () => {
+    const sql = "SELECT * FROM users";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecuteInNewResultTab();
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { openInNewResultTab: true });
+  });
+
+  it("keeps the new-result-tab intent through SQL parameter input", async () => {
+    const sql = "SELECT * FROM users WHERE id = :id";
+    const resolvedSql = "SELECT * FROM users WHERE id = 7";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["id"], rows: [[7]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecuteInNewResultTab();
+
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+
+    await execution.onSqlParametersConfirm(resolvedSql);
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(resolvedSql, { openInNewResultTab: true });
+  });
+
   it("sends native SET variables without client-side expansion", async () => {
     const activeTab = ref<QueryTab | undefined>(queryTab("app"));
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
@@ -325,7 +377,7 @@ describe("useSqlExecution", () => {
     expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: "relation does not exist" }));
   });
 
-  it("keeps the full dangerous script pending and executes it unchanged after confirmation", async () => {
+  it("keeps the full dangerous script and new-result-tab intent through confirmation", async () => {
     const activeTab = ref<QueryTab | undefined>(queryTab("app"));
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
     const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
@@ -343,7 +395,7 @@ describe("useSqlExecution", () => {
       activeOutputView,
     });
 
-    await execution.tryExecute();
+    await execution.tryExecuteInNewResultTab();
 
     expect(execution.showDangerDialog.value).toBe(true);
     expect(execution.pendingDangerSql.value).toBe(sql);
@@ -351,7 +403,36 @@ describe("useSqlExecution", () => {
 
     await execution.onDangerConfirm();
 
-    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { openInNewResultTab: true });
+  });
+
+  it("keeps the new-result-tab intent through Redis command confirmation", async () => {
+    const sql = "DEL user:1";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("0"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("redis"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      blockDangerousRedisCommands: ref(true),
+    });
+
+    await execution.tryExecuteInNewResultTab();
+
+    expect(execution.showDangerDialog.value).toBe(true);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+
+    await execution.onDangerConfirm();
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { skipRedisSafetyCheck: false, openInNewResultTab: true });
   });
 
   it("requires production confirmation even when ordinary danger prompts are disabled", async () => {

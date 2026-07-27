@@ -849,12 +849,13 @@ export const useQueryStore = defineStore("query", () => {
     return tab.resultAutoSave === true;
   }
 
-  function syncActiveResultRunFromDisplayed(tab: QueryTab) {
+  function syncActiveResultRunFromDisplayed(tab: QueryTab, sql?: string) {
     if (!tab.activeResultRunId || !tab.resultRuns?.length) return;
     const index = tab.resultRuns.findIndex((run) => run.id === tab.activeResultRunId);
     if (index < 0) return;
     const run = {
       ...tab.resultRuns[index],
+      ...(sql ? { sql } : {}),
       result: tab.result,
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
@@ -891,11 +892,11 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultRuns[index] = run;
   }
 
-  function syncDisplayedResultRun(tab: QueryTab, sql: string) {
+  function syncDisplayedResultRun(tab: QueryTab, sql: string, captureNewRun = false) {
     if (tab.mode !== "query" || !tab.result) return;
     if (tab.activeResultRunId) {
-      syncActiveResultRunFromDisplayed(tab);
-    } else if (tab.resultAutoSave) {
+      syncActiveResultRunFromDisplayed(tab, sql);
+    } else if (captureNewRun || tab.resultAutoSave) {
       captureDisplayedResultRun(tab, sql);
     }
   }
@@ -2478,7 +2479,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number }) {
+  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean }) {
     if (!activeTabId.value) return;
     const tab = tabs.value.find((item) => item.id === activeTabId.value);
     if (tab?.mode === "query") {
@@ -2981,6 +2982,7 @@ export const useQueryStore = defineStore("query", () => {
       sourceOffset?: number;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
+      openInNewResultTab?: boolean;
     },
   ) {
     const tab = tabs.value.find((t) => t.id === id);
@@ -2997,11 +2999,17 @@ export const useQueryStore = defineStore("query", () => {
       tab.queryExecutionStartedAt = Date.now();
     }
     tab.executionId = executionId;
+    const previousDisplayedSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
     tab.lastExecutedSql = sql;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
-    const updateActiveResultRun = !!tab.activeResultRunId && options?.preserveResultDuringExecution === true;
+    const openInNewResultTab = tab.mode === "query" && options?.openInNewResultTab === true;
+    if (openInNewResultTab && tab.result && !tab.activeResultRunId) {
+      captureDisplayedResultRun(tab, previousDisplayedSql);
+    }
+    const preserveResultDuringExecution = options?.preserveResultDuringExecution === true || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !openInNewResultTab);
+    const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     if (!updateActiveResultRun) {
       tab.activeResultRunId = undefined;
     }
@@ -3010,7 +3018,7 @@ export const useQueryStore = defineStore("query", () => {
     }
     tab.resultTotalRowCountLoading = false;
     const previousResultSessionClose = closeResultSession(tab, options?.pagination?.sessionId);
-    if (!options?.preserveResultDuringExecution || !tab.result) {
+    if (!preserveResultDuringExecution || !tab.result) {
       clearResultPayload(tab);
     }
     queryExecutionLog("info", "start", {
@@ -3116,7 +3124,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql, openInNewResultTab);
           // Reflect db switches from SELECT N in the tab so the toolbar dropdown, tab title and
           // sidebar stay in sync with the command's effective db.
           if (current.database !== String(currentDb)) {
@@ -3424,7 +3432,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? options?.resultBaseSql ?? sql) : (options?.resultBaseSql ?? sql);
           current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql);
+          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql, openInNewResultTab);
           if (current.database !== currentDatabase) current.database = currentDatabase;
         }
         return;
@@ -3478,7 +3486,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = undefined;
-          syncDisplayedResultRun(current, current.resultBaseSql);
+          syncDisplayedResultRun(current, current.resultBaseSql, openInNewResultTab);
         }
         return;
       }
@@ -3662,7 +3670,7 @@ export const useQueryStore = defineStore("query", () => {
           totalRowCountResolved = true;
         }
         touchResult(current);
-        syncDisplayedResultRun(current, queryBaseSql);
+        syncDisplayedResultRun(current, queryBaseSql, openInNewResultTab);
         if (!options?.appendResult && !totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
           countQueryTotalRowsInBackground({
             tabId: id,
@@ -3753,7 +3761,7 @@ export const useQueryStore = defineStore("query", () => {
         current.resultTotalRowCount = undefined;
         current.resultTotalRowCountLoading = false;
         touchResult(current);
-        syncDisplayedResultRun(current, queryBaseSql);
+        syncDisplayedResultRun(current, queryBaseSql, openInNewResultTab);
       }
     } finally {
       const current = tabs.value.find((t) => t.id === id);

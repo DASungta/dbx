@@ -115,6 +115,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
   });
 
+  it("defaults retained result runs to tiled tabs and preserves list mode", () => {
+    expect(normalizeEditorSettings({}).resultRunDisplayMode).toBe("tabs");
+    expect(normalizeEditorSettings({ resultRunDisplayMode: "list" }).resultRunDisplayMode).toBe("list");
+    expect(normalizeEditorSettings({ resultRunDisplayMode: "invalid" as any }).resultRunDisplayMode).toBe("tabs");
+  });
+
   it("defaults persistent data grid view options off and preserves enabled values", () => {
     const defaults = normalizeEditorSettings({});
     expect(defaults.dataGridMultiRowTranspose).toBe(false);
@@ -347,6 +353,19 @@ describe("settingsStore sidebar connection sort persistence", () => {
 
     await store.persistEditorSettings();
     expect(isProxy(saveEditorSettings.mock.calls[1][0])).toBe(false);
+  });
+
+  it("persists the retained result run display mode", async () => {
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.updateEditorSettings({ resultRunDisplayMode: "list" });
+
+    expect(store.editorSettings.resultRunDisplayMode).toBe("list");
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ resultRunDisplayMode: "list" }));
+    expect(isProxy(saveEditorSettings.mock.calls[0][0])).toBe(false);
   });
 });
 
