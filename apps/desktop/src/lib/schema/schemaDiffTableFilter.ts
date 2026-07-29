@@ -49,7 +49,7 @@ function isSchemaDiffObjectEnabled(table: TableInfo, options: Pick<SchemaDiffCom
   return isSchemaDiffView(table) ? options.views : options.tables;
 }
 
-export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter, options: Pick<SchemaDiffCompareOptions, "tables" | "views">): FilteredSchemaDiffTables {
+export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter, options: Pick<SchemaDiffCompareOptions, "tables" | "views"> = { tables: true, views: true }): FilteredSchemaDiffTables {
   const includeTable = (table: TableInfo) => isSchemaDiffObjectEnabled(table, options) && matchesSchemaDiffTableFilter(table.name, filter);
 
   return {
