@@ -262,6 +262,21 @@ test("defaults unsaved SQL close confirmation to enabled", () => {
   assert.equal(normalizeEditorSettings({ confirmUnsavedSqlClose: false }).confirmUnsavedSqlClose, false);
 });
 
+test("defaults saved SQL to its saved target and normalizes persisted target modes", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode, "saved");
+  assert.equal(normalizeEditorSettings({}).savedSqlOpenTargetMode, "saved");
+  assert.equal(normalizeEditorSettings({ savedSqlOpenTargetMode: "current" }).savedSqlOpenTargetMode, "current");
+  assert.equal(normalizeEditorSettings({ savedSqlOpenTargetMode: "invalid" as any }).savedSqlOpenTargetMode, "saved");
+});
+
+test("shows the saved SQL target selector in Editor settings", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+
+  assert.match(source, /id="editor-saved-sql-open-target"/);
+  assert.match(source, /<SelectItem value="saved">/);
+  assert.match(source, /<SelectItem value="current">/);
+});
+
 test("defaults Vim mode to off and preserves saved booleans", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.vimModeEnabled, false);
   assert.equal(normalizeEditorSettings({}).vimModeEnabled, false);

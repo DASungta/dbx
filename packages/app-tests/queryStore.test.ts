@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { afterEach, test } from "vitest";
 import { createPinia, disposePinia, getActivePinia, setActivePinia } from "pinia";
-import { isReactive, toRaw } from "vue";
+import { isReactive, nextTick, toRaw } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
 import { analyzeEditableQueryEditability } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
@@ -10,6 +10,7 @@ import { useExportTracker } from "../../apps/desktop/src/composables/useExportTr
 import { resolveHistorySqlRestoreTarget } from "../../apps/desktop/src/lib/history/historyRestoreTarget.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
+import { useSavedSqlStore } from "../../apps/desktop/src/stores/savedSqlStore.ts";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 import type { HistoryEntry } from "../../apps/desktop/src/lib/backend/tauri.ts";
@@ -287,6 +288,189 @@ test("clean saved SQL tabs persist without duplicating SQL text", async () => {
     assert.equal(tab?.sql, "");
     assert.equal(store.isTabDirty(tab!), false);
   } finally {
+    restoreStorage();
+  }
+});
+
+test("saved SQL opens with its saved execution target by default", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [conn("saved-connection"), conn("current-connection")];
+    const store = useQueryStore();
+    store.createTab("current-connection", "current_database", "current.sql", "query", "current_schema", undefined, "current_catalog");
+
+    const tabId = store.openSavedSql({
+      id: "saved-target",
+      connectionId: "saved-connection",
+      name: "saved.sql",
+      database: "saved_database",
+      schema: "saved_schema",
+      sql: "SELECT 1;",
+      sqlLoaded: true,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    });
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.equal(tab?.connectionId, "saved-connection");
+    assert.equal(tab?.database, "saved_database");
+    assert.equal(tab?.schema, "saved_schema");
+    assert.equal(tab?.catalog, undefined);
+  } finally {
+    await nextTick();
+    restoreStorage();
+  }
+});
+
+test("saved SQL can follow the current tab execution target", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [conn("saved-connection"), conn("current-connection")];
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({ savedSqlOpenTargetMode: "current" });
+    const store = useQueryStore();
+    store.createTab("current-connection", "current_database", "current.sql", "query", "current_schema", undefined, "current_catalog");
+
+    const tabId = store.openSavedSql({
+      id: "current-target",
+      connectionId: "saved-connection",
+      name: "saved.sql",
+      database: "saved_database",
+      schema: "saved_schema",
+      sql: "SELECT 1;",
+      sqlLoaded: true,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    });
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.equal(tab?.connectionId, "current-connection");
+    assert.equal(tab?.database, "current_database");
+    assert.equal(tab?.schema, "current_schema");
+    assert.equal(tab?.catalog, "current_catalog");
+  } finally {
+    await nextTick();
+    restoreStorage();
+  }
+});
+
+test("saved SQL supports a one-off current-tab target override", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [conn("saved-connection"), conn("current-connection")];
+    const store = useQueryStore();
+    store.createTab("current-connection", "tenant_42", "tenant.sql", "query", "tenant", undefined, "analytics");
+
+    const tabId = store.openSavedSql(
+      {
+        id: "current-target-override",
+        connectionId: "saved-connection",
+        name: "saved.sql",
+        database: "saved_database",
+        sql: "SELECT 1;",
+        sqlLoaded: true,
+        createdAt: "2026-07-30T00:00:00.000Z",
+        updatedAt: "2026-07-30T00:00:00.000Z",
+      },
+      { targetMode: "current" },
+    );
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(
+      {
+        connectionId: tab?.connectionId,
+        database: tab?.database,
+        schema: tab?.schema,
+        catalog: tab?.catalog,
+      },
+      {
+        connectionId: "current-connection",
+        database: "tenant_42",
+        schema: "tenant",
+        catalog: "analytics",
+      },
+    );
+  } finally {
+    await nextTick();
+    restoreStorage();
+  }
+});
+
+test("hydrating saved SQL content preserves its restored runtime target", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [conn("saved-connection"), conn("current-connection")];
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({ savedSqlOpenTargetMode: "current" });
+    const store = useQueryStore();
+    const savedSqlStore = useSavedSqlStore();
+    const file = {
+      id: "hydrate-current-target",
+      connectionId: "saved-connection",
+      name: "saved.sql",
+      database: "saved_database",
+      schema: "saved_schema",
+      sql: "SELECT 1;",
+      sqlLoaded: true,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    savedSqlStore.files = [file];
+    store.createTab("current-connection", "runtime_database", "current.sql", "query", "runtime_schema");
+    const tabId = store.openSavedSql(file);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.sql = "";
+
+    await store.hydrateSavedSqlTabs();
+
+    assert.equal(tab.connectionId, "current-connection");
+    assert.equal(tab.database, "runtime_database");
+    assert.equal(tab.schema, "runtime_schema");
+    assert.equal(tab.sql, "SELECT 1;");
+  } finally {
+    await nextTick();
+    restoreStorage();
+  }
+});
+
+test("changing a saved SQL tab target does not rebind its saved default", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [conn("saved-connection"), conn("runtime-connection")];
+    const savedSqlStore = useSavedSqlStore();
+    const file = {
+      id: "keep-saved-target",
+      connectionId: "saved-connection",
+      name: "saved.sql",
+      database: "saved_database",
+      schema: "saved_schema",
+      sql: "SELECT 1;",
+      sqlLoaded: true,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    savedSqlStore.files = [file];
+    const store = useQueryStore();
+    const tabId = store.openSavedSql(file);
+
+    store.updateConnection(tabId, "runtime-connection", "runtime_database");
+    store.updateSchema(tabId, "runtime_schema");
+
+    assert.equal(savedSqlStore.getFile(file.id)?.connectionId, "saved-connection");
+    assert.equal(savedSqlStore.getFile(file.id)?.database, "saved_database");
+    assert.equal(savedSqlStore.getFile(file.id)?.schema, "saved_schema");
+  } finally {
+    await nextTick();
     restoreStorage();
   }
 });

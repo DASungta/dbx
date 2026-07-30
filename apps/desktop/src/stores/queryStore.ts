@@ -64,6 +64,12 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
 import { formatError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import {
+  resolveSavedSqlExecutionTarget,
+  savedSqlExecutionTargetFromTab,
+  type SavedSqlExecutionTarget,
+  type SavedSqlOpenTargetMode,
+} from "@/lib/savedSql/savedSqlExecutionTarget";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { SavedSqlFile } from "@/types/database";
@@ -93,6 +99,10 @@ interface BuildQueryResultExportRequestOptions {
   includeSqlSheet?: boolean;
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
+}
+
+interface OpenSavedSqlOptions {
+  targetMode?: SavedSqlOpenTargetMode;
 }
 
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
@@ -2437,7 +2447,26 @@ export const useQueryStore = defineStore("query", () => {
     refreshExternalSqlFileTitles();
   }
 
-  function openSavedSql(file: SavedSqlFile) {
+  function currentSavedSqlExecutionTarget(): SavedSqlExecutionTarget | undefined {
+    const activeTab = tabs.value.find((tab) => tab.id === activeTabId.value);
+    const target = savedSqlExecutionTargetFromTab(activeTab);
+    if (!target || !useConnectionStore().getConfig(target.connectionId)) return undefined;
+    return target;
+  }
+
+  function applySavedSqlExecutionTarget(tab: QueryTab, target: SavedSqlExecutionTarget) {
+    updateConnection(tab.id, target.connectionId, target.database);
+    if (tab.catalog !== target.catalog || tab.database !== target.database) {
+      if (tab.catalog !== undefined || target.catalog !== undefined) updateCatalog(tab.id, target.catalog, target.database);
+      else updateDatabase(tab.id, target.database);
+    }
+    updateSchema(tab.id, target.schema);
+  }
+
+  function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
+    const targetMode = options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode;
+    const currentTarget = targetMode === "current" ? currentSavedSqlExecutionTarget() : undefined;
+    const target = resolveSavedSqlExecutionTarget(file, targetMode, currentTarget);
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
       persistSavedSqlEditorPosition(existing);
@@ -2448,6 +2477,7 @@ export const useQueryStore = defineStore("query", () => {
         existing.editorSelection = restored.selection;
         existing.editorViewport = restored.viewport;
       }
+      applySavedSqlExecutionTarget(existing, target);
       switchTab(existing.id);
       return existing.id;
     }
@@ -2458,9 +2488,10 @@ export const useQueryStore = defineStore("query", () => {
       id,
       title: file.name,
       customTitle: true,
-      connectionId: file.connectionId,
-      database: file.database,
-      schema: file.schema,
+      connectionId: target.connectionId,
+      database: target.database,
+      schema: target.schema,
+      catalog: target.catalog,
       sql: file.sql,
       savedSqlId: file.id,
       originalSql: file.sql,
@@ -2484,9 +2515,6 @@ export const useQueryStore = defineStore("query", () => {
       const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
       if (!file) continue;
       tab.title = tab.customTitle ? tab.title : file.name;
-      tab.connectionId = file.connectionId;
-      tab.database = file.database;
-      tab.schema = file.schema;
       tab.sql = file.sql;
       tab.originalSql = file.sql;
       const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
@@ -2582,22 +2610,6 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
-
-    // Sync connection change back to the saved SQL file if this tab is linked
-    if (tab.savedSqlId) {
-      const savedSqlStore = useSavedSqlStore();
-      void savedSqlStore.ensureFileContent(tab.savedSqlId).then((existing) => {
-        if (!existing) return;
-        return savedSqlStore.saveFile({
-          id: existing.id,
-          connectionId,
-          name: existing.name,
-          database,
-          schema: existing.schema,
-          sql: existing.sql,
-        });
-      });
-    }
   }
 
   function clearInvalidDataTabSortState(tab: QueryTab, columns: NonNullable<QueryTab["tableMeta"]>["columns"]): boolean {
