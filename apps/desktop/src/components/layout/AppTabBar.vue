@@ -449,7 +449,8 @@ function tabColorStyle(tab: QueryTab) {
 
 function tabIconClass(tab: QueryTab) {
   if (tab.mode === "mq") return "";
-  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "hbase" || tab.mode === "objects" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
+  if (tab.mode === "objects") return "text-amber-500 dark:text-amber-400";
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "hbase" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
   return "text-blue-600 dark:text-blue-400";
 }
 
