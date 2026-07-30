@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  resolveSavedSqlExecutionTarget,
-  savedSqlDefaultTargetForWrite,
-  savedSqlExecutionTargetFromTab,
-} from "@/lib/savedSql/savedSqlExecutionTarget";
+import { resolveSavedSqlExecutionTarget, savedSqlDefaultTargetForWrite, savedSqlExecutionTargetFromTab } from "@/lib/savedSql/savedSqlExecutionTarget";
 
 const savedTarget = {
   connectionId: "saved-connection",
@@ -13,21 +9,25 @@ const savedTarget = {
 
 describe("saved SQL execution targets", () => {
   it("uses the saved target by default", () => {
-    expect(resolveSavedSqlExecutionTarget(savedTarget, "saved", {
-      connectionId: "current-connection",
-      database: "current_database",
-      schema: "current_schema",
-      catalog: "current_catalog",
-    })).toEqual(savedTarget);
+    expect(
+      resolveSavedSqlExecutionTarget(savedTarget, "saved", {
+        connectionId: "current-connection",
+        database: "current_database",
+        schema: "current_schema",
+        catalog: "current_catalog",
+      }),
+    ).toEqual(savedTarget);
   });
 
   it("uses the current tab target when requested", () => {
-    expect(resolveSavedSqlExecutionTarget(savedTarget, "current", {
-      connectionId: "current-connection",
-      database: "current_database",
-      schema: "current_schema",
-      catalog: "current_catalog",
-    })).toEqual({
+    expect(
+      resolveSavedSqlExecutionTarget(savedTarget, "current", {
+        connectionId: "current-connection",
+        database: "current_database",
+        schema: "current_schema",
+        catalog: "current_catalog",
+      }),
+    ).toEqual({
       connectionId: "current-connection",
       database: "current_database",
       schema: "current_schema",
