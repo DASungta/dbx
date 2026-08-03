@@ -1,0 +1,15 @@
+{
+  "id": "data-dictionary",
+  "name": "DBX Data Dictionary Plugin",
+  "version": "0.1.0",
+  "protocol_version": 1,
+  "description": "Renders database schema metadata into Word/Excel/HTML/Markdown data dictionary documents.",
+  "executable": "bin/dbx-data-dictionary-plugin",
+  "drivers": [
+    {
+      "id": "data-dictionary",
+      "label": "Data Dictionary",
+      "kind": "exporter"
+    }
+  ]
+}

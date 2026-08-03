@@ -1238,7 +1238,8 @@ impl AppState {
     }
 
     pub fn external_driver_runtime_env(&self, driver_id: &str) -> Result<PluginRuntimeEnv, String> {
-        if driver_id != "jdbc" {
+        // Plugins that run on the JVM get the managed Java runtime injected.
+        if !matches!(driver_id, "jdbc" | crate::data_dictionary::DATA_DICTIONARY_PLUGIN_ID) {
             return Ok(PluginRuntimeEnv::default());
         }
         let state = self.agent_manager.load_state();

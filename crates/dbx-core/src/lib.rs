@@ -25,6 +25,7 @@ pub mod connection_secrets;
 pub mod correction;
 pub mod csv_export;
 pub mod data_compare;
+pub mod data_dictionary;
 pub mod data_grid_extractors;
 pub mod data_grid_sql;
 pub mod database_capabilities;

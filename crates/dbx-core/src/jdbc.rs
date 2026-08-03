@@ -515,7 +515,7 @@ fn install_jdbc_plugin_zip(bytes: &[u8], plugin_dir: &Path) -> Result<(), String
     Ok(())
 }
 
-fn strip_zip_root(path: &Path) -> PathBuf {
+pub(crate) fn strip_zip_root(path: &Path) -> PathBuf {
     let mut components = path.components();
     let first = components.next();
     if let (Some(std::path::Component::Normal(_)), Some(_)) = (first, components.clone().next()) {

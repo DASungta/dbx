@@ -14,6 +14,8 @@ pub struct TauriRelease {
     pub notes: Option<String>,
     #[serde(default)]
     pub jdbc_plugin: Option<JdbcPluginLatest>,
+    #[serde(default)]
+    pub data_dictionary_plugin: Option<JdbcPluginLatest>,
     #[serde(skip)]
     pub github: Option<GithubReleaseMetadata>,
     // 英文 release notes，由 R2 latest-en.json 填充（latest.json 不含此字段）。
@@ -455,6 +457,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             version: "0.5.3".to_string(),
             notes: Some("See the assets below to download and install.".to_string()),
             jdbc_plugin: None,
+            data_dictionary_plugin: None,
             github: Some(GithubReleaseMetadata {
                 name: Some("DBX v0.5.3".to_string()),
                 html_url: Some("https://github.com/t8y2/dbx/releases/tag/v0.5.3".to_string()),
@@ -478,6 +481,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             version: "0.5.3".to_string(),
             notes: Some("See the assets below to download and install.".to_string()),
             jdbc_plugin: None,
+            data_dictionary_plugin: None,
             github: Some(GithubReleaseMetadata {
                 name: Some("DBX v0.5.3".to_string()),
                 html_url: Some("https://github.com/t8y2/dbx/releases/tag/v0.5.3".to_string()),
@@ -497,6 +501,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             version: "0.5.3".to_string(),
             notes: Some("## What's Changed\n* generated item".to_string()),
             jdbc_plugin: None,
+            data_dictionary_plugin: None,
             github: None,
             notes_en: None,
         };
