@@ -66,6 +66,7 @@ pub struct ExecuteBatchRequest {
     pub schema: Option<String>,
     pub catalog: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub destructive_confirmed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -560,6 +561,7 @@ pub async fn execute_script_with_2pc(
         &req.database,
         &req.statements,
         req.schema.as_deref(),
+        req.destructive_confirmed.unwrap_or(false),
     )
     .await;
     Ok(Json(result))
@@ -962,6 +964,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -986,6 +989,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req)).await.expect("empty deploy should succeed");
@@ -1007,6 +1011,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1018,6 +1023,28 @@ mod tests {
         assert!(log.error.as_ref().is_some_and(|e| !e.is_empty()));
         // Missing connection cannot have applied statements.
         assert_eq!(log.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "missing-conn".to_string(),
+            database: "testdb".to_string(),
+            statements: vec!["DROP INDEX idx_old ON users".to_string()],
+            schema: None,
+            catalog: None,
+            timeout_secs: None,
+            destructive_confirmed: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req))
+            .await
+            .expect("destructive deploy should return a structured block result");
+        let log = result.0;
+        assert_eq!(log.status, "rolled_back");
+        assert_eq!(log.executed_count, 0);
+        assert_eq!(log.metadata["blocked"], "destructive_confirmation_required");
     }
 
     #[test]

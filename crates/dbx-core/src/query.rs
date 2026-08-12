@@ -23,7 +23,7 @@ use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::query_execution_sql::is_write_sql;
+use crate::query_execution_sql::{is_write_sql, strip_sql_comments_and_literals};
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
 use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
@@ -3072,6 +3072,19 @@ fn executed_count_before_error(error: &str, statement_count: usize) -> usize {
     statement_number.saturating_sub(1).min(statement_count)
 }
 
+fn is_destructive_schema_diff_statement(statement: &str) -> bool {
+    let normalized = strip_sql_comments_and_literals(statement).to_ascii_uppercase();
+    let tokens = normalized
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    match tokens.first().copied() {
+        Some("DROP" | "TRUNCATE") => true,
+        Some("ALTER") => tokens.iter().skip(1).any(|token| *token == "DROP"),
+        _ => false,
+    }
+}
+
 /// Pure failure mapping used by deploy and unit tests.
 fn schema_diff_failure_outcome(
     atomicity: SchemaDiffAtomicity,
@@ -3129,6 +3142,7 @@ pub async fn execute_schema_diff_deploy(
     database: &str,
     statements: &[String],
     schema: Option<&str>,
+    destructive_confirmed: bool,
 ) -> SchemaDiffDeployResult {
     let tx_id = format!("deploy_{}", uuid::Uuid::new_v4());
     let now = chrono::Utc::now().to_rfc3339();
@@ -3154,6 +3168,27 @@ pub async fn execute_schema_diff_deploy(
         name: format!("{connection_id}/{database}"),
         role: "database".to_string(),
     };
+
+    let destructive_statement_count =
+        parsed.iter().filter(|statement| is_destructive_schema_diff_statement(statement)).count();
+    if destructive_statement_count > 0 && !destructive_confirmed {
+        return SchemaDiffDeployResult {
+            transaction_id: tx_id,
+            status: crate::two_phase_commit::TransactionStatus::RolledBack.as_str().to_string(),
+            participants: vec![participant],
+            created_at: now.clone(),
+            updated_at: now,
+            executed_count: 0,
+            statement_count: parsed.len(),
+            error: Some("Destructive schema diff SQL requires explicit confirmation".to_string()),
+            metadata: serde_json::json!({
+                "source": "schema_diff_deploy",
+                "mode": "single_connection_tx",
+                "blocked": "destructive_confirmation_required",
+                "destructive_statement_count": destructive_statement_count,
+            }),
+        };
+    }
 
     if parsed.is_empty() {
         return SchemaDiffDeployResult {
@@ -4455,6 +4490,22 @@ mod tests {
         assert!(postgres_prefers_text_protocol(Some(DatabaseType::Redshift)));
         assert!(!postgres_prefers_text_protocol(Some(DatabaseType::Postgres)));
         assert!(!postgres_prefers_text_protocol(None));
+    }
+
+    #[test]
+    fn schema_diff_destructive_detection_covers_drop_and_alter_drop() {
+        assert!(is_destructive_schema_diff_statement("DROP INDEX idx_users_email ON users"));
+        assert!(is_destructive_schema_diff_statement("TRUNCATE TABLE audit_log"));
+        assert!(is_destructive_schema_diff_statement(
+            "ALTER TABLE users DROP COLUMN legacy_code, DROP INDEX idx_legacy"
+        ));
+    }
+
+    #[test]
+    fn schema_diff_destructive_detection_ignores_comments_literals_and_identifiers() {
+        assert!(!is_destructive_schema_diff_statement("-- DROP INDEX idx_fake\nSELECT 1"));
+        assert!(!is_destructive_schema_diff_statement("SELECT 'DROP TABLE users'"));
+        assert!(!is_destructive_schema_diff_statement("ALTER TABLE \"DROP INDEX audit\" ADD COLUMN note TEXT"));
     }
     #[cfg(unix)]
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
