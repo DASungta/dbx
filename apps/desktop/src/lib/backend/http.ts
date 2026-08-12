@@ -2162,7 +2162,7 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
           finish(() => reject(new Error(progress.errorMessage || "Export failed")));
         } else if (progress.status === "Done") {
           // Trigger browser download
-          downloadTableExportFile(exportId, request.format);
+          downloadTableExportFile(exportId);
           finish(() => resolve(progress));
         } else {
           finish(() => resolve(progress));
@@ -2176,11 +2176,9 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
   });
 }
 
-function downloadTableExportFile(exportId: string, format: string): void {
-  const ext = format === "markdown" || format === "md" ? "md" : format;
+function downloadTableExportFile(exportId: string): void {
   const a = document.createElement("a");
   a.href = apiUrl(`/api/export/table/download/${exportId}`);
-  a.download = `table_export_${exportId}.${ext}`;
   a.click();
 }
 
@@ -2218,7 +2216,7 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
         if (progress.status === "Error") {
           finish(() => reject(new Error(progress.errorMessage || "Export failed")));
         } else if (progress.status === "Done") {
-          downloadQueryResultExportFile(exportId, request.format);
+          downloadQueryResultExportFile(exportId);
           finish(() => resolve(progress));
         } else {
           finish(() => resolve(progress));
@@ -2232,10 +2230,9 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
   });
 }
 
-function downloadQueryResultExportFile(exportId: string, format: string): void {
+function downloadQueryResultExportFile(exportId: string): void {
   const a = document.createElement("a");
   a.href = apiUrl(`/api/export/query-result/download/${exportId}`);
-  a.download = `query_result_export_${exportId}.${format}`;
   a.click();
 }
 
