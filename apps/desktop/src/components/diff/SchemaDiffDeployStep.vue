@@ -97,11 +97,7 @@ const topLevelObjects = computed(() => {
 });
 
 const operationCounts = computed(() => {
-  const counts = summarizeSchemaDiffOperations(props.selectedObjects);
-  return {
-    ...counts,
-    delete: props.destructiveStatementCount ?? counts.delete,
-  };
+  return summarizeSchemaDiffOperations(props.selectedObjects);
 });
 
 const selectedObjectCount = computed(() => selectedSchemaDiffObjects(props.selectedObjects).length);

@@ -30,7 +30,7 @@ Regression coverage belongs in:
 
 Schema Diff review and execution must preserve these invariants:
 
-- Deletion summaries expand nested changes on modified tables, such as dropped or rebuilt indexes, columns, foreign keys, and triggers. Whole-table changes count the table once.
+- Review groups preserve the original top-level object hierarchy. A modified table with dropped or rebuilt indexes, columns, foreign keys, or triggers appears once in the delete group at table level, while final SQL review lists the exact destructive operations.
 - A table and its nested differences are one selection unit because the backend returns one aggregated `syncSql` block per table. Clearing a nested object must clear the table so hidden sibling DDL cannot execute.
 - Final deploy SQL is scanned again after user edits. Any `DROP`, `TRUNCATE`, or `ALTER ... DROP` operation must be listed in the final confirmation.
 - The core deploy endpoint rejects destructive Schema Diff SQL unless the request carries explicit destructive confirmation. UI classification is never the only safety boundary.

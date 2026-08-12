@@ -908,12 +908,18 @@ export function setSchemaDiffObjectSelected(objects: SchemaDiffObject[], objectI
 }
 
 export function selectedSchemaDiffObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
-  return schemaDiffReviewObjects(objects).filter((object) => object.selected && object.operationType !== "none");
+  return objects.filter((object) => object.selected && object.operationType !== "none");
+}
+
+export function schemaDiffSelectionOwnerId(object: SchemaDiffObject): string {
+  return object.parentId ?? object.id;
 }
 
 export function summarizeSchemaDiffOperations(objects: SchemaDiffObject[]): Record<DiffOperationType, number> {
   const counts: Record<DiffOperationType, number> = { create: 0, modify: 0, delete: 0, none: 0 };
-  for (const object of selectedSchemaDiffObjects(objects)) counts[object.operationType]++;
+  for (const object of schemaDiffReviewObjects(objects)) {
+    if (object.selected && object.operationType !== "none") counts[object.operationType]++;
+  }
   return counts;
 }
 
@@ -1012,7 +1018,24 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
 }
 
 function schemaDiffReviewObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
-  return objects.flatMap((object) => [object, ...(object.operationType === "modify" ? flattenSchemaDiffObjects(object.children ?? []).filter((child) => child.operationType === "delete") : [])]);
+  return objects.flatMap((object) => {
+    if (object.operationType !== "modify") return [object];
+
+    const destructiveChildren = flattenSchemaDiffObjects(object.children ?? []).filter((child) => child.operationType === "delete");
+    if (destructiveChildren.length === 0) return [object];
+
+    const deleteReviewObject: SchemaDiffObject = {
+      ...object,
+      id: `delete-risk-${object.id}`,
+      operationType: "delete",
+      sourceName: undefined,
+      targetName: object.targetName ?? object.name,
+      children: undefined,
+      parentId: object.id,
+      changes: destructiveChildren.flatMap((child) => child.changes ?? []),
+    };
+    return [object, deleteReviewObject];
+  });
 }
 
 function getObjectTypeLabel(kind: DiffObjectKind): string {

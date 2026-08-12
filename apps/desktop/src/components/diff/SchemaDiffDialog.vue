@@ -29,6 +29,7 @@ import {
   groupDiffObjects,
   injectColumnRenameSql,
   schemaDiffDeployTargetSchema,
+  schemaDiffSelectionOwnerId,
   selectedSchemaDiffObjects,
   setSchemaDiffObjectSelected,
   summarizeSchemaDiffOperations,
@@ -542,7 +543,7 @@ function handleToggleTypeGroup(operationType: DiffOperationType, kind: DiffObjec
 function handleToggleGroupSelection(operationType: DiffOperationType, selected: boolean) {
   const group = diffGroups.value.find((candidate) => candidate.operationType === operationType);
   for (const object of group?.typeGroups.flatMap((typeGroup) => typeGroup.objects) ?? []) {
-    setSchemaDiffObjectSelected(diffObjects.value, object.id, selected);
+    setSchemaDiffObjectSelected(diffObjects.value, schemaDiffSelectionOwnerId(object), selected);
   }
   rebuildDiffGroups();
   regenerateDeploySql();
@@ -551,14 +552,15 @@ function handleToggleGroupSelection(operationType: DiffOperationType, selected: 
 function handleToggleTypeSelection(operationType: DiffOperationType, kind: DiffObjectKind, selected: boolean) {
   const typeGroup = diffGroups.value.find((group) => group.operationType === operationType)?.typeGroups.find((candidate) => candidate.kind === kind);
   for (const object of typeGroup?.objects ?? []) {
-    setSchemaDiffObjectSelected(diffObjects.value, object.id, selected);
+    setSchemaDiffObjectSelected(diffObjects.value, schemaDiffSelectionOwnerId(object), selected);
   }
   rebuildDiffGroups();
   regenerateDeploySql();
 }
 
 function handleToggleObjectSelection(objectId: string, selected: boolean) {
-  if (!setSchemaDiffObjectSelected(diffObjects.value, objectId, selected)) return;
+  const reviewObject = diffGroups.value.flatMap((group) => group.typeGroups.flatMap((typeGroup) => typeGroup.objects)).find((object) => object.id === objectId);
+  if (!setSchemaDiffObjectSelected(diffObjects.value, reviewObject ? schemaDiffSelectionOwnerId(reviewObject) : objectId, selected)) return;
   rebuildDiffGroups();
   regenerateDeploySql();
 }
@@ -823,7 +825,7 @@ const deployStats = computed(() => {
   return {
     create: counts.create,
     modify: counts.modify,
-    delete: destructiveStatements.value.length,
+    delete: counts.delete,
     total: selectedSchemaDiffObjects(diffObjects.value).length,
   };
 });

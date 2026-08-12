@@ -7,6 +7,7 @@ import {
   groupDiffObjects,
   schemaDiffDeployTargetSchema,
   schemaDiffReviewAlert,
+  schemaDiffSelectionOwnerId,
   setSchemaDiffObjectSelected,
   summarizeSchemaDiffOperations,
   type TableDiff,
@@ -59,24 +60,27 @@ test("uses mysql target database as schema diff deploy qualifier", () => {
   assert.equal(schemaDiffDeployTargetSchema("sqlite", "main", ""), undefined);
 });
 
-test("counts a removed index in the delete group when its table is modified", () => {
+test("shows a modified table with a removed index once in the delete group", () => {
   const objects = convertToSchemaDiffObjects([
     {
       type: "modified",
       objectType: "table",
       name: "users",
+      ddl: "CREATE TABLE `users` (`email` varchar(255), KEY `idx_users_email` (`email`));",
+      targetDdl: "CREATE TABLE `users` (`email` varchar(255));",
       syncSql: "DROP INDEX `idx_users_email` ON `users`;",
       indexes: [{ type: "removed", name: "idx_users_email" }],
     },
   ]);
 
   const deleteGroup = groupDiffObjects(objects).find((group) => group.operationType === "delete");
-  const indexes = deleteGroup?.typeGroups.find((group) => group.kind === "index")?.objects ?? [];
+  const tables = deleteGroup?.typeGroups.find((group) => group.kind === "table")?.objects ?? [];
 
-  assert.deepEqual(
-    indexes.map((index) => ({ name: index.name, parentName: index.parentName })),
-    [{ name: "idx_users_email", parentName: "users" }],
-  );
+  assert.equal(tables.length, 1);
+  assert.equal(tables[0].name, "users");
+  assert.equal(tables[0].sourceDdl, objects[0].sourceDdl);
+  assert.equal(tables[0].targetDdl, objects[0].targetDdl);
+  assert.equal(schemaDiffSelectionOwnerId(tables[0]), objects[0].id);
   assert.equal(deleteGroup?.count, 1);
   assert.equal(summarizeSchemaDiffOperations(objects).delete, 1);
 });
@@ -108,7 +112,7 @@ test("keeps ordinary child changes under the modified table while surfacing dele
   assert.equal(createGroup?.count, 0);
   assert.deepEqual(
     deleteGroup?.typeGroups.map((group) => ({ kind: group.kind, names: group.objects.map((object) => object.name) })),
-    [{ kind: "index", names: ["idx_legacy"] }],
+    [{ kind: "table", names: ["users"] }],
   );
 
   assert.deepEqual(summarizeSchemaDiffOperations(objects), { create: 0, modify: 1, delete: 1, none: 0 });
@@ -144,6 +148,28 @@ test("surfaces a modified foreign key as delete risk because deployment drops it
   const foreignKey = objects[0].children?.find((child) => child.objectKind === "foreignKey");
   assert.equal(foreignKey?.operationType, "delete");
   assert.equal(summarizeSchemaDiffOperations(objects).delete, 1);
+});
+
+test("counts multiple destructive child changes on one modified table once", () => {
+  const objects = convertToSchemaDiffObjects([
+    {
+      type: "modified",
+      objectType: "table",
+      name: "orders",
+      syncSql: "ALTER TABLE `orders` DROP COLUMN `legacy_code`, DROP INDEX `idx_legacy`, DROP FOREIGN KEY `fk_legacy`;",
+      columns: [{ type: "removed", name: "legacy_code" }],
+      indexes: [{ type: "removed", name: "idx_legacy" }],
+      foreignKeys: [{ type: "removed", name: "fk_legacy" }],
+    },
+  ]);
+
+  const deleteGroup = groupDiffObjects(objects).find((group) => group.operationType === "delete");
+  assert.equal(deleteGroup?.count, 1);
+  assert.deepEqual(
+    deleteGroup?.typeGroups.map((group) => group.kind),
+    ["table"],
+  );
+  assert.deepEqual(summarizeSchemaDiffOperations(objects), { create: 0, modify: 1, delete: 1, none: 0 });
 });
 
 test("does not double count children when an entire table is deleted", () => {
