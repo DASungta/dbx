@@ -101,6 +101,8 @@ import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUser
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { decorateDatabaseSavedSqlTreeNodes, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
@@ -278,6 +280,10 @@ export type TreeClipboard =
   | {
       kind: "connection-copy";
       connections: TreeClipboardConnectionEntry[];
+    }
+  | {
+      kind: "saved-sql-copy";
+      fileIds: string[];
     };
 
 interface LoadTreeOptions {
@@ -309,6 +315,7 @@ function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
 export const useConnectionStore = defineStore("connection", () => {
   const settingsStore = useSettingsStore();
   const tunnelProfileStore = useTunnelProfileStore();
+  const savedSqlStore = useSavedSqlStore();
   const connections = ref<ConnectionConfig[]>([]);
   const isDesktop = isTauriRuntime();
   const activeConnectionId = ref<string | null>(localStorage.getItem(ACTIVE_CONNECTION_STORAGE_KEY));
@@ -1168,7 +1175,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function isConnectionUtilityNode(node: TreeNode): boolean {
-    return node.type === "user-admin" || node.type === "dameng-job-admin";
+    return node.type === "user-admin" || node.type === "dameng-job-admin" || node.type === "saved-sql-root";
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
@@ -1229,7 +1236,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function syncConfirmedEmptyTreeNodeId(parent: TreeNode) {
     if (parent.type !== "database" && parent.type !== "schema" && parent.type !== "linked-server-schema") return;
-    const childCount = parent.children?.length ?? 0;
+    const childCount = parent.children?.filter((child) => child.type !== "saved-sql-root").length ?? 0;
     if (childCount === 0) confirmedEmptyTreeNodeIds.value.add(parent.id);
     else confirmedEmptyTreeNodeIds.value.delete(parent.id);
   }
@@ -1267,6 +1274,10 @@ export const useConnectionStore = defineStore("connection", () => {
   function setChildren(parent: TreeNode, children: TreeNode[]) {
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children);
+    children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlStore.allFiles, parent.children);
+    if (parent.type === "database") {
+      children = withDatabaseSavedSqlRoot(parent, children, savedSqlStore.allFiles);
+    }
     if (shouldClearDescendantLoadedMarkers(parent, children)) {
       clearDescendantLoadedChildrenMarkers(parent.id);
       // Parent load may still be current; only supersede descendant generations.
@@ -1404,6 +1415,21 @@ export const useConnectionStore = defineStore("connection", () => {
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
     return withConnectionUtilityNodes(connectionId, children, existingConnectionNode);
   }
+
+  function refreshDatabaseSavedSqlTrees(nodes: TreeNode[] = treeNodes.value) {
+    for (const node of nodes) {
+      if (node.type === "database") {
+        node.children = withDatabaseSavedSqlRoot(node, node.children || [], savedSqlStore.allFiles);
+      }
+      if (node.children) refreshDatabaseSavedSqlTrees(node.children);
+    }
+  }
+
+  watch(
+    () => savedSqlStore.version,
+    () => refreshDatabaseSavedSqlTrees(),
+    { flush: "sync" },
+  );
 
   function schemaCacheKey(...parts: string[]): string {
     return parts.map((part) => encodeURIComponent(part)).join(":");
@@ -1974,7 +2000,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(children)).catch(() => undefined);
+    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(stripDatabaseSavedSqlTreeNodes(children))).catch(() => undefined);
   }
 
   function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {

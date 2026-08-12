@@ -20,6 +20,7 @@ import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCoun
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
+import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 const { t } = useI18n();
@@ -96,34 +97,12 @@ function uniqueImportedName(name: string, takenNames: Set<string>) {
   }
 }
 
-async function downloadText(content: string, fileName: string) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
 async function exportSingleFile(file: SavedSqlFile) {
   try {
     const loadedFile = await savedSqlStore.ensureFileContent(file.id);
     if (!loadedFile) return;
-    const defaultFileName = sanitizeFileSystemSegment(ensureSqlExtension(file.name));
-    if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-      const path = await save({
-        defaultPath: defaultFileName,
-        filters: [{ name: "SQL", extensions: ["sql"] }],
-      });
-      if (!path) return;
-      await writeTextFile(path, loadedFile.sql);
-    } else {
-      await downloadText(loadedFile.sql, defaultFileName);
-    }
-    toast(t("sqlLibrary.exported"), 2000);
+    const result = await exportSavedSqlFileContent(loadedFile.sql, file.name);
+    if (result === "saved") toast(t("sqlLibrary.exported"), 2000);
   } catch (e: any) {
     toast(t("sqlLibrary.exportFailed", { message: e?.message || String(e) }), 5000);
   }

@@ -515,6 +515,7 @@ describe("connectionStore metadata loading", () => {
     expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
       ["schema", "app", "app"],
       ["schema", "reporting", "reporting"],
+      ["saved-sql-root", "tree.queries", undefined],
     ]);
   });
 
@@ -592,7 +593,10 @@ describe("connectionStore metadata loading", () => {
 
     expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
     expect(listTables).toHaveBeenCalled();
-    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "t", undefined]]);
+    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
+      ["table", "t", undefined],
+      ["saved-sql-root", "tree.queries", undefined],
+    ]);
   });
 
   it("keeps the flat object tree for GBase 8s databases that cannot qualify schemas in DML", async () => {
@@ -626,7 +630,10 @@ describe("connectionStore metadata loading", () => {
 
     expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "dbx_test");
     expect(listTables).toHaveBeenCalled();
-    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "connection_smoke", undefined]]);
+    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
+      ["table", "connection_smoke", undefined],
+      ["saved-sql-root", "tree.queries", undefined],
+    ]);
   });
 
   it("renders simple-mode table children without waiting for supplemental objects", async () => {
@@ -1090,7 +1097,7 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app", { force: true });
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
-    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions"]);
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions", "tree.queries"]);
   });
 
   it("preserves the last successful tree snapshot when a forced metadata refresh fails", async () => {
@@ -1207,7 +1214,7 @@ describe("connectionStore metadata loading", () => {
     await olderRefresh;
 
     expect(listSchemaInfos).toHaveBeenCalledTimes(2);
-    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions"]);
+    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.queries"]);
   });
 
   it("does not let an older refresh failure overwrite a newer successful refresh", async () => {
@@ -1263,7 +1270,7 @@ describe("connectionStore metadata loading", () => {
     rejectOlderMetadata(new Error("connection closed"));
     await expect(olderRefresh).rejects.toThrow("connection closed");
 
-    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions"]);
+    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.queries"]);
     expect(store.connectionErrors[connection.id]).toBeUndefined();
     expect(store.connectedIds.has(connection.id)).toBe(true);
   });
@@ -1396,7 +1403,7 @@ describe("connectionStore metadata loading", () => {
     const databaseNode = store.treeNodes[0]!.children![0]!;
 
     await store.loadSchemas(connection.id, "app");
-    expect(databaseNode.children?.map((node) => node.label).filter((label) => label !== "tree.extensions")).toEqual(["public"]);
+    expect(databaseNode.children?.filter((node) => node.type === "schema").map((node) => node.label)).toEqual(["public"]);
 
     store.connections[0]!.show_system_schemas = true;
     databaseNode.children = [];
@@ -1404,7 +1411,7 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app");
 
     expect(loadSchemaCache.mock.calls.map(([key]) => key)).toEqual([`${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:show-system`]);
-    expect(databaseNode.children?.map((node) => node.label).filter((label) => label !== "tree.extensions")).toEqual(["information_schema", "pg_catalog", "public"]);
+    expect(databaseNode.children?.filter((node) => node.type === "schema").map((node) => node.label)).toEqual(["information_schema", "pg_catalog", "public"]);
   });
 
   it("clears a failed metadata warning when the driver hint finishes during retry", async () => {
@@ -1838,7 +1845,8 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadDatabases(connection.id, { force: true });
     expect(listDatabases).toHaveBeenCalledTimes(1);
-    expect(connectionNode.children![0].children?.length ?? 0).toBe(0);
+    expect(connectionNode.children![0].children?.map((node) => node.type)).toEqual(["saved-sql-root"]);
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(false);
 
     await store.loadTables(connection.id, "test1");
     expect(connectionNode.children![0].children?.length).toBeGreaterThan(0);

@@ -4,6 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import { forgetSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { nextSavedSqlCopyName } from "@/lib/savedSql/savedSqlClipboard";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "@/types/database";
@@ -358,6 +359,32 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     await syncToLocalDirectory();
   }
 
+  async function copyFilesToDatabase(fileIds: readonly string[], target: SavedSqlExecutionTargetInput): Promise<SavedSqlFile[]> {
+    const uniqueFileIds = [...new Set(fileIds)];
+    const takenNames = new Set(files.value.filter((file) => file.connectionId === target.connectionId && file.database === target.database).map((file) => file.name));
+    const copies: SavedSqlFile[] = [];
+
+    for (const fileId of uniqueFileIds) {
+      const source = await ensureFileContent(fileId);
+      if (!source) continue;
+      const name = nextSavedSqlCopyName(source.name, takenNames);
+      takenNames.add(name);
+      const sourceFolder = source.folderId ? folders.value.find((folder) => folder.id === source.folderId) : undefined;
+      const keepSourceScope = source.connectionId === target.connectionId && source.database === target.database;
+      const saved = await saveFile({
+        connectionId: target.connectionId,
+        folderId: sourceFolder?.connectionId === target.connectionId ? source.folderId : undefined,
+        name,
+        database: target.database,
+        schema: keepSourceScope ? source.schema : target.schema,
+        sql: source.sql,
+      });
+      copies.push({ ...saved, sqlLoaded: true });
+    }
+
+    return copies;
+  }
+
   async function recordFileUsage(id: string) {
     const existing = getFile(id);
     if (!existing) return;
@@ -654,6 +681,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     saveFile,
     updateFileExecutionTarget,
     renameFile,
+    copyFilesToDatabase,
     recordFileUsage,
     deleteFile,
     reorderFolders,

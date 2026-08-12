@@ -926,7 +926,7 @@ function bindSidebarTreeRuntimeHost(host: Element | ComponentPublicInstance | nu
   sidebarTreeRuntime.bindHost(runtimeHost);
 }
 
-const pendingRenameGroupId = ref<string | null>(null);
+const pendingRenameNodeId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
 let highlightTimer: number | undefined;
 
@@ -991,7 +991,7 @@ async function createNewGroup() {
 }
 
 async function startRenamingCreatedGroup(groupId: string) {
-  pendingRenameGroupId.value = groupId;
+  pendingRenameNodeId.value = groupId;
   store.selectedTreeNodeId = groupId;
   if (isRootListPartial.value) {
     searchQuery.value = "";
@@ -1002,6 +1002,14 @@ async function startRenamingCreatedGroup(groupId: string) {
 
   await scrollToSidebarNode(groupId);
   store.selectedTreeNodeId = groupId;
+}
+
+async function startRenamingSavedSqlNode(nodeId: string) {
+  pendingRenameNodeId.value = nodeId;
+  store.selectedTreeNodeId = nodeId;
+  store.selectedTreeNodeIds = [nodeId];
+  await scrollToSidebarNode(nodeId);
+  store.selectedTreeNodeId = nodeId;
 }
 
 async function locateActiveTabInSidebar() {
@@ -1022,13 +1030,25 @@ async function locateActiveTabInSidebar() {
   }
 
   const config = connId ? store.getConfig(connId) : undefined;
-  const cursorCandidate = queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
-  const fallbackTarget = queryContextTargetFromCandidate(tab, cursorCandidate) ?? activeTabSidebarTarget(tab);
+  const tabTarget = activeTabSidebarTarget(tab);
+  const locatesSavedSql = tabTarget?.type === "saved-sql-file";
+  const cursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, cursorCandidate) ?? tabTarget);
   const initialTarget = cursorCandidate ? tableTargetFromCandidate(cursorCandidate) : fallbackTarget;
   if (!initialTarget) return;
 
   // Ensure the tree is loaded deep enough to contain the preferred target.
-  await ensureTreeLoadedForTarget(initialTarget);
+  // Saved SQL rows live below their database's runtime Queries node. Loading
+  // the database context first also makes explicit locate work after reconnect.
+  const treeLoadTarget: ActiveTabSidebarTarget =
+    locatesSavedSql && tab.connectionId && tab.database
+      ? {
+          type: "query-context",
+          connectionId: tab.connectionId,
+          database: tab.database,
+        }
+      : initialTarget;
+  await ensureTreeLoadedForTarget(treeLoadTarget);
 
   // Clear any active search filter so the node is visible
   if (isRootListPartial.value) {
@@ -1040,12 +1060,12 @@ async function locateActiveTabInSidebar() {
 
   let target = resolveLoadedLocateTarget(initialTarget, cursorCandidate);
   let nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
-  if (!nodePath) {
+  if (!nodePath && !locatesSavedSql) {
     // The first load may have served a stale schema cache whose async refresh
     // replaced the database node before its tables finished loading, so the
     // table isn't in the tree yet. Force a synchronous reload and retry once so
     // locate reaches the table, not just the database (issue #715).
-    await ensureTreeLoadedForTarget(initialTarget, { force: true });
+    await ensureTreeLoadedForTarget(treeLoadTarget, { force: true });
     target = resolveLoadedLocateTarget(initialTarget, cursorCandidate);
     nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   }
@@ -1783,6 +1803,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-visible-nacos-namespaces="openSidebarVisibleNacosNamespaces"
       @open-table-name-filters="openSidebarTableNameFilters"
       @request-group-rename="startRenamingCreatedGroup"
+      @request-saved-sql-rename="startRenamingSavedSqlNode"
       @open-danger-dialog="openSidebarDangerDialog"
       @open-dialog-controller="updateSidebarTreeItemDialogController"
       @open-install-extension="openSidebarInstallExtension"
@@ -1894,11 +1915,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
               :node="item.node"
               :depth="item.depth"
               :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
-              :pending-rename="pendingRenameGroupId === item.node.id"
+              :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.node.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-              @rename-started="pendingRenameGroupId = null"
+              @rename-started="pendingRenameNodeId = null"
               @group-created="startRenamingCreatedGroup"
             />
           </template>
@@ -1941,11 +1962,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
               :node="item.node"
               :depth="item.depth"
               :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
-              :pending-rename="pendingRenameGroupId === item.node.id"
+              :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-              @rename-started="pendingRenameGroupId = null"
+              @rename-started="pendingRenameNodeId = null"
               @group-created="startRenamingCreatedGroup"
             />
           </div>

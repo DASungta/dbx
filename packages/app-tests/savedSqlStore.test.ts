@@ -445,6 +445,77 @@ test("renaming a saved SQL file syncs linked tab titles", async () => {
   assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.title, "revenue.sql");
 });
 
+test("copies saved SQL into the target database with a Navicat-style suffix", async () => {
+  const folder: SavedSqlFolder = {
+    id: "folder-1",
+    connectionId: "conn-1",
+    name: "Reports",
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  const source: SavedSqlFile = {
+    id: "sql-1",
+    connectionId: "conn-1",
+    folderId: "folder-1",
+    name: "report.sql",
+    database: "app",
+    schema: "public",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  const firstCopy: SavedSqlFile = { ...source, id: "sql-2", name: "report_copy1.sql" };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [folder], files: [source, firstCopy] });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+  const copies = await store.copyFilesToDatabase([source.id], {
+    connectionId: "conn-1",
+    database: "app",
+    schema: "public",
+  });
+
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0]?.name, "report_copy2.sql");
+  assert.equal(copies[0]?.connectionId, "conn-1");
+  assert.equal(copies[0]?.database, "app");
+  assert.equal(copies[0]?.schema, "public");
+  assert.equal(copies[0]?.folderId, "folder-1");
+  assert.equal(copies[0]?.sql, "SELECT 1;");
+});
+
+test("hydrates saved SQL before copying it to another database", async () => {
+  const summary: SavedSqlFile = {
+    id: "sql-1",
+    connectionId: "conn-1",
+    name: "report.sql",
+    database: "app",
+    schema: "public",
+    sql: "",
+    sqlLoaded: false,
+    createdAt: "2026-06-27T00:00:00.000Z",
+    updatedAt: "2026-06-27T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [summary] });
+  apiMock.loadSavedSqlFile.mockResolvedValue({ ...summary, sql: "SELECT * FROM reports;", sqlLoaded: true });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+  const [copy] = await store.copyFilesToDatabase([summary.id], {
+    connectionId: "conn-2",
+    database: "analytics",
+    schema: "reporting",
+  });
+
+  assert.equal(copy?.name, "report_copy1.sql");
+  assert.equal(copy?.connectionId, "conn-2");
+  assert.equal(copy?.database, "analytics");
+  assert.equal(copy?.schema, "reporting");
+  assert.equal(copy?.sql, "SELECT * FROM reports;");
+  assert.equal(apiMock.loadSavedSqlFile.mock.calls.length, 1);
+});
+
 test("renaming a saved SQL tab syncs the library file name", async () => {
   const file: SavedSqlFile = {
     id: "sql-1",
