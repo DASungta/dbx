@@ -81,6 +81,39 @@ test("counts a removed index in the delete group when its table is modified", ()
   assert.equal(summarizeSchemaDiffOperations(objects).delete, 1);
 });
 
+test("keeps ordinary child changes under the modified table while surfacing delete risks", () => {
+  const objects = convertToSchemaDiffObjects([
+    {
+      type: "modified",
+      objectType: "table",
+      name: "users",
+      syncSql: "ALTER TABLE `users` MODIFY COLUMN `name` varchar(128), ADD COLUMN `nickname` varchar(64), DROP INDEX `idx_legacy`;",
+      columns: [
+        { type: "modified", name: "name" },
+        { type: "added", name: "nickname" },
+      ],
+      indexes: [{ type: "removed", name: "idx_legacy" }],
+    },
+  ]);
+
+  const groups = groupDiffObjects(objects);
+  const modifyGroup = groups.find((group) => group.operationType === "modify");
+  const createGroup = groups.find((group) => group.operationType === "create");
+  const deleteGroup = groups.find((group) => group.operationType === "delete");
+
+  assert.deepEqual(
+    modifyGroup?.typeGroups.map((group) => ({ kind: group.kind, names: group.objects.map((object) => object.name) })),
+    [{ kind: "table", names: ["users"] }],
+  );
+  assert.equal(createGroup?.count, 0);
+  assert.deepEqual(
+    deleteGroup?.typeGroups.map((group) => ({ kind: group.kind, names: group.objects.map((object) => object.name) })),
+    [{ kind: "index", names: ["idx_legacy"] }],
+  );
+
+  assert.deepEqual(summarizeSchemaDiffOperations(objects), { create: 0, modify: 1, delete: 1, none: 0 });
+});
+
 test("surfaces a modified index as delete risk because deployment drops it first", () => {
   const objects = convertToSchemaDiffObjects([
     {

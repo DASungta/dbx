@@ -1012,7 +1012,7 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
 }
 
 function schemaDiffReviewObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
-  return objects.flatMap((object) => [object, ...(object.operationType === "modify" ? flattenSchemaDiffObjects(object.children ?? []) : [])]);
+  return objects.flatMap((object) => [object, ...(object.operationType === "modify" ? flattenSchemaDiffObjects(object.children ?? []).filter((child) => child.operationType === "delete") : [])]);
 }
 
 function getObjectTypeLabel(kind: DiffObjectKind): string {
