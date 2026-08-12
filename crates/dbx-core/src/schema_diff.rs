@@ -19,6 +19,13 @@ use crate::types::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum ColumnAddPosition {
+    First,
+    After(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ColumnDiff {
     #[serde(rename = "type")]
     pub diff_type: String,
@@ -29,6 +36,8 @@ pub struct ColumnDiff {
     pub target: Option<ColumnInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_position: Option<ColumnAddPosition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1170,6 +1179,7 @@ impl RollbackGraph {
                     source: c.target.clone(),
                     target: c.source.clone(),
                     changes: c.changes.iter().map(|ch| Self::invert_change_string(ch)).collect(),
+                    add_position: c.add_position.clone(),
                 }
             })
             .collect()
@@ -1944,12 +1954,14 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                 detail
                     .columns
                     .iter()
-                    .map(|c| ColumnDiff {
+                    .enumerate()
+                    .map(|(index, c)| ColumnDiff {
                         diff_type: "added".to_string(),
                         name: c.name.clone(),
                         source: Some(c.clone()),
                         target: None,
                         changes: vec![],
+                        add_position: Some(column_add_position(&detail.columns, index)),
                     })
                     .collect()
             }),
@@ -2015,12 +2027,14 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                 detail
                     .columns
                     .iter()
-                    .map(|column| ColumnDiff {
+                    .enumerate()
+                    .map(|(index, column)| ColumnDiff {
                         diff_type: "removed".to_string(),
                         name: column.name.clone(),
                         source: None,
                         target: Some(column.clone()),
                         changes: vec![],
+                        add_position: Some(column_add_position(&detail.columns, index)),
                     })
                     .collect()
             }),
@@ -2262,6 +2276,7 @@ fn diff_columns_with_options(
                     source: Some(source_column.clone()),
                     target: Some((*target_column).clone()),
                     changes,
+                    add_position: None,
                 });
             }
         } else {
@@ -2271,11 +2286,12 @@ fn diff_columns_with_options(
                 source: Some(source_column.clone()),
                 target: None,
                 changes: Vec::new(),
+                add_position: Some(column_add_position(source, source_index)),
             });
         }
     }
 
-    for target_column in target {
+    for (target_index, target_column) in target.iter().enumerate() {
         if !source_map.contains_key(target_column.name.as_str()) {
             diffs.push(ColumnDiff {
                 diff_type: "removed".to_string(),
@@ -2283,6 +2299,7 @@ fn diff_columns_with_options(
                 source: None,
                 target: Some(target_column.clone()),
                 changes: Vec::new(),
+                add_position: Some(column_add_position(target, target_index)),
             });
         }
     }
@@ -2342,6 +2359,7 @@ fn diff_columns_with_options(
                 source: Some(new_col),
                 target: Some(old_col),
                 changes: vec![format!("{} → {}", old_name, new_name)],
+                add_position: None,
             };
             diffs[*ai] = ColumnDiff {
                 diff_type: "_matched_rename".to_string(),
@@ -2349,6 +2367,7 @@ fn diff_columns_with_options(
                 source: None,
                 target: None,
                 changes: Vec::new(),
+                add_position: None,
             };
         }
 
@@ -2356,6 +2375,14 @@ fn diff_columns_with_options(
     }
 
     diffs
+}
+
+fn column_add_position(columns: &[ColumnInfo], index: usize) -> ColumnAddPosition {
+    if index == 0 {
+        ColumnAddPosition::First
+    } else {
+        ColumnAddPosition::After(columns[index - 1].name.clone())
+    }
 }
 
 pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff> {
@@ -3536,7 +3563,22 @@ fn generate_schema_sync_sql_inner(
                 match column.diff_type.as_str() {
                     "added" => {
                         if let Some(source) = &column.source {
-                            parts.push(format!("  ADD COLUMN {}", column_def(&convert_col(source), db_type)));
+                            let position = if db_type == DatabaseType::Mysql {
+                                match &column.add_position {
+                                    Some(ColumnAddPosition::First) => " FIRST".to_string(),
+                                    Some(ColumnAddPosition::After(predecessor)) => {
+                                        format!(" AFTER {}", quote_id(predecessor, db_type))
+                                    }
+                                    None => String::new(),
+                                }
+                            } else {
+                                String::new()
+                            };
+                            parts.push(format!(
+                                "  ADD COLUMN {}{}",
+                                column_def(&convert_col(source), db_type),
+                                position
+                            ));
                         }
                     }
                     "removed" => {
@@ -4051,6 +4093,74 @@ mod tests {
         assert!(sql.contains("ADD COLUMN `create_at`"), "MySQL new col: {sql}");
         assert!(sql.contains("MODIFY COLUMN `id`"), "MySQL modify type: {sql}");
         assert!(!sql.contains("DROP COLUMN"), "MySQL no drop: {sql}");
+    }
+
+    #[test]
+    fn mysql_add_columns_preserve_source_positions() {
+        let diffs = make_col_diffs(
+            &[("first", "int"), ("a", "int"), ("middle", "varchar(32)"), ("next", "int"), ("last", "int")],
+            &[("a", "int"), ("last", "int")],
+            false,
+        );
+
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Mysql, None);
+
+        assert!(sql.contains("ADD COLUMN `first` int NOT NULL FIRST"), "first position: {sql}");
+        assert!(sql.contains("ADD COLUMN `middle` varchar(32) NOT NULL AFTER `a`"), "middle position: {sql}");
+        assert!(sql.contains("ADD COLUMN `next` int NOT NULL AFTER `middle`"), "consecutive additions: {sql}");
+    }
+
+    #[test]
+    fn mysql_add_column_quotes_predecessor_and_keeps_trailing_position() {
+        let diffs = make_col_diffs(
+            &[("odd`name", "int"), ("middle", "int"), ("tail", "int"), ("new_tail", "int")],
+            &[("odd`name", "int"), ("tail", "int")],
+            false,
+        );
+
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Mysql, None);
+
+        assert!(sql.contains("ADD COLUMN `middle` int NOT NULL AFTER `odd``name`"), "quoted predecessor: {sql}");
+        assert!(sql.contains("ADD COLUMN `new_tail` int NOT NULL AFTER `tail`"), "trailing position: {sql}");
+    }
+
+    #[test]
+    fn non_mysql_add_columns_do_not_emit_mysql_position_clauses() {
+        let diffs = make_col_diffs(&[("first", "int"), ("a", "int"), ("middle", "int")], &[("a", "int")], false);
+
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Postgres, None);
+
+        assert!(!sql.contains(" FIRST"), "PostgreSQL must not use FIRST: {sql}");
+        assert!(!sql.contains(" AFTER "), "PostgreSQL must not use AFTER: {sql}");
+    }
+
+    #[test]
+    fn mysql_add_after_renamed_predecessor_uses_final_source_name() {
+        let diffs =
+            make_col_diffs(&[("new_name", "varchar(32)"), ("inserted", "int")], &[("old_name", "varchar(32)")], true);
+
+        let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Mysql, None);
+
+        assert!(sql.contains("ADD COLUMN `inserted` int NOT NULL AFTER `new_name`"), "rename predecessor: {sql}");
+        assert!(sql.contains("CHANGE COLUMN `old_name` `new_name`"), "rename remains present: {sql}");
+    }
+
+    #[test]
+    fn mysql_manual_added_diff_without_position_keeps_legacy_sql() {
+        let diff = ColumnDiff {
+            diff_type: "added".into(),
+            name: "legacy".into(),
+            source: Some(column("legacy", "int", None)),
+            target: None,
+            changes: Vec::new(),
+            add_position: None,
+        };
+
+        let sql = gen_sql(wrap_table_diff("t", vec![diff]), DatabaseType::Mysql, None);
+
+        assert!(sql.contains("ADD COLUMN `legacy` int NOT NULL"), "legacy add: {sql}");
+        assert!(!sql.contains(" FIRST"), "legacy diff has no position: {sql}");
+        assert!(!sql.contains(" AFTER "), "legacy diff has no position: {sql}");
     }
 
     #[test]
@@ -4868,6 +4978,7 @@ mod tests {
                 source: Some(column("name", "varchar(64)", Some("用户姓名"))),
                 target: Some(column("name", "varchar(64)", Some("Name"))),
                 changes: vec!["comment: Name → 用户姓名".to_string()],
+                add_position: None,
             }]),
             indexes: None,
             foreign_keys: None,
@@ -4904,6 +5015,7 @@ mod tests {
                 source: Some(column("config_json", "json", Some("渠道配置"))),
                 target: Some(column("config_json", "json", Some("Config"))),
                 changes: vec!["comment: Config → 渠道配置".to_string()],
+                add_position: None,
             }]),
             indexes: None,
             foreign_keys: None,
@@ -4949,6 +5061,7 @@ mod tests {
                 source: Some(column("config_json", "json", Some("渠道配置"))),
                 target: Some(column("config_json", "json", Some("Config"))),
                 changes: vec!["comment: Config → 渠道配置".to_string()],
+                add_position: None,
             }]),
             indexes: None,
             foreign_keys: None,
@@ -5104,6 +5217,7 @@ mod tests {
                 }),
                 target: None,
                 changes: Vec::new(),
+                add_position: None,
             }]),
             indexes: Some(vec![IndexDiff {
                 diff_type: "added".to_string(),
@@ -5969,6 +6083,7 @@ mod tests {
                 source: Some(source_col.clone()),
                 target: Some(target_col.clone()),
                 changes: vec!["type: varchar(50) → varchar(100)".to_string()],
+                add_position: None,
             }]),
             indexes: None,
             foreign_keys: None,
@@ -6618,6 +6733,7 @@ mod tests {
                 source: Some(column("new_name", "varchar(50)", None)),
                 target: Some(column("old_name", "varchar(50)", None)),
                 changes: vec!["old_name → new_name".to_string()],
+                add_position: None,
             }]),
             indexes: None,
             foreign_keys: None,
@@ -6649,6 +6765,7 @@ mod tests {
                 source: Some(column("id", "int(11)", None)),
                 target: None,
                 changes: vec![],
+                add_position: None,
             }]),
             indexes: None,
             foreign_keys: None,
@@ -7659,6 +7776,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7671,6 +7789,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7683,6 +7802,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7695,6 +7815,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ];
         let indexes = vec![IndexDiff {
@@ -7805,6 +7926,7 @@ mod tests {
                 source: Some(col_pk("id", "int")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7817,6 +7939,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ]
     }
@@ -7877,6 +8000,7 @@ mod tests {
                 source: Some(col_pk("id", "int")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7889,6 +8013,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7901,6 +8026,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7914,6 +8040,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7926,6 +8053,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -7938,6 +8066,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ];
         let idxs = vec![IndexDiff {
@@ -8008,6 +8137,7 @@ mod tests {
                 source: Some(col_pk("id", "int")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -8020,6 +8150,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ];
         let fks = vec![ForeignKeyDiff {
@@ -8142,6 +8273,7 @@ mod tests {
                 source: Some(col_pk("id", "integer")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -8154,6 +8286,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ];
         let td = TableDiff {
@@ -8190,6 +8323,7 @@ mod tests {
                 source: Some(col_pk("id", "int")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -8202,6 +8336,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ];
         let td = TableDiff {
@@ -8237,6 +8372,7 @@ mod tests {
                 source: Some(col_pk("id", "Int32")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -8249,6 +8385,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ];
         let td = TableDiff {
@@ -8282,6 +8419,7 @@ mod tests {
                 source: Some(col_pk("id", "int")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
             ColumnDiff {
                 diff_type: "added".into(),
@@ -8294,6 +8432,7 @@ mod tests {
                 }),
                 target: None,
                 changes: vec![],
+                add_position: None,
             },
         ];
         let table_diff = TableDiff {
@@ -8548,6 +8687,7 @@ mod tests {
                 source: Some(column("created_at", "timestamp(0) without time zone", None)),
                 target: Some(column("created_at", "timestamp without time zone", None)),
                 changes: vec!["type: timestamp without time zone → timestamp(0) without time zone".into()],
+                add_position: None,
             }]),
             ..TableDiff::default()
         };
