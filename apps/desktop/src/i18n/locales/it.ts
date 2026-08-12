@@ -4914,6 +4914,8 @@ export default withEnglishFallback({
     deployConfirmTitle: "Conferma Finale",
     deployConfirmMessage: "Stai per distribuire le seguenti modifiche al database di destinazione",
     destructiveSqlDetected: "Rilevate {count} operazioni distruttive; è richiesta una conferma esplicita",
+    compatibilityWarnings: "Avvisi di compatibilità",
+    compatibilityWarningsDetected: "Avvisi di compatibilità: {count}",
     targetServer: "Server Destinazione",
     dbVersion: "Versione Database",
     targetDatabase: "Database Destinazione",

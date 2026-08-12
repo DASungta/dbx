@@ -4914,6 +4914,8 @@ export default withEnglishFallback({
     deployConfirmTitle: "Confirmación final",
     deployConfirmMessage: "Estás a punto de desplegar los siguientes cambios en la base de datos de destino",
     destructiveSqlDetected: "Se detectaron {count} operaciones destructivas; se requiere confirmación explícita",
+    compatibilityWarnings: "Advertencias de compatibilidad",
+    compatibilityWarningsDetected: "Advertencias de compatibilidad: {count}",
     targetServer: "Servidor de destino",
     dbVersion: "Versión de base de datos",
     targetDatabase: "Base de datos de destino",

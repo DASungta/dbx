@@ -917,6 +917,14 @@ export function summarizeSchemaDiffOperations(objects: SchemaDiffObject[]): Reco
   return counts;
 }
 
+export type SchemaDiffReviewAlert = "destructive" | "compatibility" | null;
+
+export function schemaDiffReviewAlert(destructiveStatementCount: number, compatibilityWarningCount: number): SchemaDiffReviewAlert {
+  if (destructiveStatementCount > 0) return "destructive";
+  if (compatibilityWarningCount > 0) return "compatibility";
+  return null;
+}
+
 export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] {
   const groups: Record<DiffOperationType, Record<DiffObjectKind, SchemaDiffObject[]>> = {
     modify: {

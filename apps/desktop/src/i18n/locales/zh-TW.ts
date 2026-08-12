@@ -4268,6 +4268,8 @@ export default withEnglishFallback({
     deployConfirmTitle: "最終確認",
     deployConfirmMessage: "您即將對目標資料庫部署以下變更",
     destructiveSqlDetected: "偵測到 {count} 個破壞性操作，確認後才允許執行",
+    compatibilityWarnings: "相容性警告",
+    compatibilityWarningsDetected: "相容性警告：{count}",
     targetServer: "目標伺服器",
     dbVersion: "資料庫版本",
     confirmDeploy: "確認部署",

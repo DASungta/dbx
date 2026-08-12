@@ -4657,6 +4657,8 @@ export default withEnglishFallback({
     deployConfirmTitle: "최종 확인",
     deployConfirmMessage: "다음 변경 사항을 대상 데이터베이스에 배포하려고 합니다",
     destructiveSqlDetected: "파괴적인 작업 {count}개가 감지되었습니다. 명시적인 확인이 필요합니다",
+    compatibilityWarnings: "호환성 경고",
+    compatibilityWarningsDetected: "호환성 경고: {count}개",
     targetServer: "대상 서버",
     dbVersion: "데이터베이스 버전",
     targetDatabase: "대상 데이터베이스",

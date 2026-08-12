@@ -4934,6 +4934,8 @@ export default withEnglishFallback({
     deployConfirmTitle: "最終確認",
     deployConfirmMessage: "以下の変更をターゲットデータベースにデプロイしようとしています",
     destructiveSqlDetected: "{count} 件の破壊的操作を検出しました。実行には明示的な確認が必要です",
+    compatibilityWarnings: "互換性に関する警告",
+    compatibilityWarningsDetected: "互換性に関する警告: {count} 件",
     targetServer: "ターゲットサーバー",
     dbVersion: "データベースバージョン",
     targetDatabase: "ターゲットデータベース",

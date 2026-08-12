@@ -5082,6 +5082,8 @@ export default withEnglishFallback({
     deployConfirmTitle: "最终确认",
     deployConfirmMessage: "您即将在目标数据库执行以下部署操作",
     destructiveSqlDetected: "检测到 {count} 个破坏性操作，确认后才允许执行",
+    compatibilityWarnings: "兼容性警告",
+    compatibilityWarningsDetected: "兼容性警告：{count}",
     targetServer: "目标服务器",
     dbVersion: "数据库版本",
     targetDatabase: "目标数据库",

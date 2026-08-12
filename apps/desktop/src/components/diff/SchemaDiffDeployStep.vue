@@ -9,7 +9,7 @@ import { useTheme } from "@/composables/useTheme";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { Splitpanes, Pane } from "splitpanes";
-import { selectedSchemaDiffObjects, summarizeSchemaDiffOperations, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type CompatibilityWarning, type RenameCandidate, type MissingRollbackObject, type RollbackCompleteness } from "@/lib/schema/schemaDiff";
+import { schemaDiffReviewAlert, selectedSchemaDiffObjects, summarizeSchemaDiffOperations, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type CompatibilityWarning, type RenameCandidate, type MissingRollbackObject, type RollbackCompleteness } from "@/lib/schema/schemaDiff";
 import ImpactReportPanel from "@/components/diff/ImpactReportPanel.vue";
 import type { ImpactReport } from "@/types/governance";
 import { ArrowLeft, Copy, Download, Play, Loader2, PlusCircle, XCircle, ArrowRightLeft, Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, Columns3, ListTree, Link2, Zap, AlertTriangle, ShieldCheck } from "@lucide/vue";
@@ -106,13 +106,8 @@ const operationCounts = computed(() => {
 
 const selectedObjectCount = computed(() => selectedSchemaDiffObjects(props.selectedObjects).length);
 
-const riskLevel = computed(() => {
-  if ((props.destructiveStatementCount ?? 0) > 0) return "dangerous";
-  const count = props.compatibilityWarnings?.length ?? 0;
-  if (count === 0) return "safe";
-  if (count <= 3) return "caution";
-  return "dangerous";
-});
+const compatibilityWarningCount = computed(() => props.compatibilityWarnings?.length ?? 0);
+const reviewAlert = computed(() => schemaDiffReviewAlert(props.destructiveStatementCount ?? 0, compatibilityWarningCount.value));
 
 const renameCount = computed(() => props.renameCandidates?.length ?? 0);
 
@@ -308,10 +303,9 @@ function getObjectIconColor(kind: DiffObjectKind): string {
         </Button>
         <span class="text-sm font-medium">{{ t("diff.deployReview") }}</span>
         <span class="text-xs text-muted-foreground"> ({{ t("diff.selectedCount", { selected: selectedObjectCount, total: selectedObjectCount }) }}) </span>
-        <!-- Risk level badge -->
-        <span v-if="riskLevel !== 'safe'" class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium" :class="riskLevel === 'dangerous' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'">
+        <span v-if="reviewAlert" class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium" :class="reviewAlert === 'destructive' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'">
           <AlertTriangle class="w-3 h-3" />
-          {{ destructiveStatementCount ? t("diff.destructiveSqlDetected", { count: destructiveStatementCount }) : riskLevel === "dangerous" ? t("diff.riskLevel.dangerous", { count: compatibilityWarnings?.length ?? 0 }) : t("diff.riskLevel.caution", { count: compatibilityWarnings?.length ?? 0 }) }}
+          {{ reviewAlert === "destructive" ? t("diff.destructiveSqlDetected", { count: destructiveStatementCount }) : t("diff.compatibilityWarningsDetected", { count: compatibilityWarningCount }) }}
         </span>
       </div>
       <div class="flex items-center gap-3 text-xs">

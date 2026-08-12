@@ -5158,6 +5158,8 @@ export default {
     deployConfirmTitle: "Final Confirmation",
     deployConfirmMessage: "You are about to deploy the following changes to the target database",
     destructiveSqlDetected: "{count} destructive operation(s) detected; explicit confirmation is required",
+    compatibilityWarnings: "Compatibility Warnings",
+    compatibilityWarningsDetected: "Compatibility warnings: {count}",
     targetServer: "Target Server",
     dbVersion: "Database Version",
     targetDatabase: "Target Database",

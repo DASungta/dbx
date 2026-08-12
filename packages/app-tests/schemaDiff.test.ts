@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { buildDeploySqlForObjects, convertToSchemaDiffObjects, detectDestructiveSchemaDiffStatements, groupDiffObjects, schemaDiffDeployTargetSchema, setSchemaDiffObjectSelected, summarizeSchemaDiffOperations, type TableDiff } from "../../apps/desktop/src/lib/schema/schemaDiff.ts";
+import {
+  buildDeploySqlForObjects,
+  convertToSchemaDiffObjects,
+  detectDestructiveSchemaDiffStatements,
+  groupDiffObjects,
+  schemaDiffDeployTargetSchema,
+  schemaDiffReviewAlert,
+  setSchemaDiffObjectSelected,
+  summarizeSchemaDiffOperations,
+  type TableDiff,
+} from "../../apps/desktop/src/lib/schema/schemaDiff.ts";
 
 test("uses generated sync SQL for modified table deployment", () => {
   const tableDiffs: TableDiff[] = [
@@ -155,4 +165,10 @@ test("detects destructive schema diff statements without comment or string false
     destructive.map(({ objectType }) => objectType),
     ["INDEX", "COLUMN", "INDEX"],
   );
+});
+
+test("does not classify compatibility warnings as destructive when no delete SQL is selected", () => {
+  assert.equal(schemaDiffReviewAlert(0, 58), "compatibility");
+  assert.equal(schemaDiffReviewAlert(1, 58), "destructive");
+  assert.equal(schemaDiffReviewAlert(0, 0), null);
 });
