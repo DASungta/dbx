@@ -15,8 +15,8 @@ describe("saved SQL tree clipboard", () => {
   });
 
   it("resolves database scope from a Queries node or saved SQL row", () => {
-    expect(savedSqlPasteTargetForNode({ type: "saved-sql-root", connectionId: "conn-1", database: "app" })).toEqual({ connectionId: "conn-1", database: "app", schema: undefined });
-    expect(savedSqlPasteTargetForNode({ type: "saved-sql-file", connectionId: "conn-1", database: "app", schema: "public" })).toEqual({ connectionId: "conn-1", database: "app", schema: "public" });
+    expect(savedSqlPasteTargetForNode({ type: "saved-sql-root", connectionId: "conn-1", catalog: "hive", database: "app" })).toEqual({ connectionId: "conn-1", catalog: "hive", database: "app", schema: undefined });
+    expect(savedSqlPasteTargetForNode({ type: "saved-sql-file", connectionId: "conn-1", database: "app", schema: "public" })).toEqual({ connectionId: "conn-1", catalog: undefined, database: "app", schema: "public" });
     expect(savedSqlPasteTargetForNode({ type: "schema", connectionId: "conn-1", database: "app", schema: "public" })).toBeNull();
   });
 

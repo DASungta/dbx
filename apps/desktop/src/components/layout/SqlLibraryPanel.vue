@@ -18,6 +18,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
+import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
@@ -80,7 +81,8 @@ function sanitizeFileSystemSegment(name: string) {
 
 function uniqueImportedName(name: string, takenNames: Set<string>) {
   const normalized = ensureSqlExtension(name);
-  if (!takenNames.has(normalized)) {
+  const normalizedTakenNames = new Set([...takenNames].map((takenName) => ensureSqlExtension(takenName).toLocaleLowerCase()));
+  if (!normalizedTakenNames.has(normalized.toLocaleLowerCase())) {
     takenNames.add(normalized);
     return normalized;
   }
@@ -89,7 +91,7 @@ function uniqueImportedName(name: string, takenNames: Set<string>) {
   let counter = 2;
   while (true) {
     const candidate = `${base} (${counter}).sql`;
-    if (!takenNames.has(candidate)) {
+    if (!normalizedTakenNames.has(candidate.toLocaleLowerCase())) {
       takenNames.add(candidate);
       return candidate;
     }
@@ -249,7 +251,8 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
 
     toast(t("sqlLibrary.imported", { count: importFiles.length }), 2500);
   } catch (e: any) {
-    toast(t("sqlLibrary.importFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+    const message = e?.code === "SAVED_SQL_NAME_CONFLICT" ? savedSqlErrorMessage(e, t) : externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params));
+    toast(t("sqlLibrary.importFailed", { message }), 5000);
   }
 }
 
@@ -413,15 +416,19 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
 
   const takenNames = folder ? new Set(savedSqlStore.filesInFolder(folder.id).map((f) => f.name)) : new Set(savedSqlStore.filesWithoutFolder().map((f) => f.name));
   const name = uniqueImportedName("new_query.sql", takenNames);
-  const file = await savedSqlStore.saveFile({
-    connectionId,
-    folderId: folder?.id,
-    name,
-    database: "",
-    sql: "",
-  });
-  const tabId = queryStore.openSavedSql(file);
-  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
+  try {
+    const file = await savedSqlStore.saveFile({
+      connectionId,
+      folderId: folder?.id,
+      name,
+      database: "",
+      sql: "",
+    });
+    const tabId = queryStore.openSavedSql(file);
+    connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
+  } catch (error) {
+    toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
 }
 
 // Batch selection state
@@ -584,7 +591,11 @@ async function confirmRename() {
   if (type === "folder") {
     await savedSqlStore.renameFolder(id, name);
   } else {
-    await savedSqlStore.renameFile(id, ensureSqlExtension(name));
+    try {
+      await savedSqlStore.renameFile(id, ensureSqlExtension(name));
+    } catch (error) {
+      toast(t("savedSql.renameFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+    }
   }
 }
 
@@ -641,9 +652,13 @@ async function executeBatchDelete() {
 async function moveFilesToFolder(fileIds: string[], folderId?: string) {
   const movableIds = [...new Set(fileIds)].filter((id) => savedSqlStore.getFile(id));
   if (movableIds.length === 0) return;
-  await savedSqlStore.moveFilesToFolder(movableIds, folderId);
-  clearSelection();
-  toast(t("sqlLibrary.moveSuccess", { count: movableIds.length }), 2000);
+  try {
+    await savedSqlStore.moveFilesToFolder(movableIds, folderId);
+    clearSelection();
+    toast(t("sqlLibrary.moveSuccess", { count: movableIds.length }), 2000);
+  } catch (error) {
+    toast(t("sqlLibrary.moveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
 }
 
 async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode) {
@@ -1041,7 +1056,7 @@ function onDocumentMouseUp() {
   const dropPromise = hadActiveDrag ? performDrop() : Promise.resolve();
   if (hadActiveDrag) markSuppressedClick();
   resetDragState();
-  void dropPromise;
+  void dropPromise.catch((error) => toast(t("sqlLibrary.moveFailed", { message: savedSqlErrorMessage(error, t) }), 5000));
 }
 
 document.addEventListener("mousemove", onDocumentMouseMove, true);

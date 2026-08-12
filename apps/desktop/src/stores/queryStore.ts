@@ -2976,6 +2976,7 @@ export const useQueryStore = defineStore("query", () => {
     void savedSqlStore
       .updateFileExecutionTarget(tab.savedSqlId, {
         connectionId: tab.connectionId,
+        catalog: tab.catalog,
         database: tab.database,
         schema: tab.schema,
       })

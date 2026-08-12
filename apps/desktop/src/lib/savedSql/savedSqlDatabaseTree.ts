@@ -18,11 +18,33 @@ function compareSavedSqlFiles(left: SavedSqlFile, right: SavedSqlFile): number {
 
 export interface SavedSqlDatabaseScope {
   connectionId: string;
+  catalog?: string;
   database: string;
 }
 
-export function savedSqlFilesForDatabase(files: readonly SavedSqlFile[], scope: SavedSqlDatabaseScope): SavedSqlFile[] {
-  return files.filter((file) => file.connectionId === scope.connectionId && file.database === scope.database).sort(compareSavedSqlFiles);
+export type SavedSqlDatabaseIndex = ReadonlyMap<string, readonly SavedSqlFile[]>;
+type SavedSqlDatabaseSource = readonly SavedSqlFile[] | SavedSqlDatabaseIndex;
+
+export function savedSqlDatabaseScopeKey(scope: SavedSqlDatabaseScope): string {
+  // Null is deliberately a concrete built-in/default catalog scope, not a wildcard.
+  return JSON.stringify([scope.connectionId, scope.catalog || null, scope.database]);
+}
+
+export function indexSavedSqlFilesByDatabase(files: readonly SavedSqlFile[]): SavedSqlDatabaseIndex {
+  const index = new Map<string, SavedSqlFile[]>();
+  for (const file of files) {
+    const key = savedSqlDatabaseScopeKey(file);
+    const scopedFiles = index.get(key);
+    if (scopedFiles) scopedFiles.push(file);
+    else index.set(key, [file]);
+  }
+  for (const scopedFiles of index.values()) scopedFiles.sort(compareSavedSqlFiles);
+  return index;
+}
+
+export function savedSqlFilesForDatabase(source: SavedSqlDatabaseSource, scope: SavedSqlDatabaseScope): SavedSqlFile[] {
+  if (!Array.isArray(source)) return [...((source as SavedSqlDatabaseIndex).get(savedSqlDatabaseScopeKey(scope)) ?? [])];
+  return source.filter((file) => savedSqlDatabaseScopeKey(file) === savedSqlDatabaseScopeKey(scope)).sort(compareSavedSqlFiles);
 }
 
 function savedSqlFileNode(rootId: string, file: SavedSqlFile): TreeNode {
@@ -31,13 +53,14 @@ function savedSqlFileNode(rootId: string, file: SavedSqlFile): TreeNode {
     label: file.name,
     type: "saved-sql-file",
     connectionId: file.connectionId,
+    catalog: file.catalog,
     database: file.database,
     schema: file.schema,
     savedSqlId: file.id,
   };
 }
 
-export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" | "connectionId" | "database">, files: readonly SavedSqlFile[], existingRoot?: TreeNode): TreeNode | null {
+export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" | "connectionId" | "catalog" | "database">, source: SavedSqlDatabaseSource, existingRoot?: TreeNode): TreeNode | null {
   if (!databaseNode.connectionId || databaseNode.database === undefined) return null;
 
   const id = `${databaseNode.id}:__queries`;
@@ -46,27 +69,29 @@ export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" 
     label: "tree.queries",
     type: "saved-sql-root",
     connectionId: databaseNode.connectionId,
+    catalog: databaseNode.catalog,
     database: databaseNode.database,
     isExpanded: existingRoot?.isExpanded ?? true,
-    children: savedSqlFilesForDatabase(files, {
+    children: savedSqlFilesForDatabase(source, {
       connectionId: databaseNode.connectionId,
+      catalog: databaseNode.catalog,
       database: databaseNode.database,
     }).map((file) => savedSqlFileNode(id, file)),
   };
 }
 
-export function withDatabaseSavedSqlRoot(databaseNode: Pick<TreeNode, "id" | "connectionId" | "database" | "children">, children: readonly TreeNode[], files: readonly SavedSqlFile[]): TreeNode[] {
+export function withDatabaseSavedSqlRoot(databaseNode: Pick<TreeNode, "id" | "connectionId" | "catalog" | "database" | "children">, children: readonly TreeNode[], source: SavedSqlDatabaseSource): TreeNode[] {
   const existingRoot = databaseNode.children?.find((child) => child.type === "saved-sql-root");
-  const root = buildDatabaseSavedSqlRootNode(databaseNode, files, existingRoot);
+  const root = buildDatabaseSavedSqlRootNode(databaseNode, source, existingRoot);
   const metadataChildren = children.filter((child) => child.type !== "saved-sql-root");
   return root ? [...metadataChildren, root] : metadataChildren;
 }
 
-export function decorateDatabaseSavedSqlTreeNodes(nodes: readonly TreeNode[], files: readonly SavedSqlFile[], existingNodes: readonly TreeNode[] = []): TreeNode[] {
+export function decorateDatabaseSavedSqlTreeNodes(nodes: readonly TreeNode[], source: SavedSqlDatabaseSource, existingNodes: readonly TreeNode[] = []): TreeNode[] {
   const existingById = new Map(existingNodes.map((node) => [node.id, node]));
   return nodes.map((node) => {
     const existing = existingById.get(node.id);
-    const children = decorateDatabaseSavedSqlTreeNodes(node.children ?? [], files, existing?.children ?? []);
+    const children = decorateDatabaseSavedSqlTreeNodes(node.children ?? [], source, existing?.children ?? []);
     if (node.type !== "database") {
       return node.children === undefined ? node : { ...node, children };
     }
@@ -77,7 +102,7 @@ export function decorateDatabaseSavedSqlTreeNodes(nodes: readonly TreeNode[], fi
     };
     return {
       ...node,
-      children: withDatabaseSavedSqlRoot(databaseNode, children, files),
+      children: withDatabaseSavedSqlRoot(databaseNode, children, source),
     };
   });
 }

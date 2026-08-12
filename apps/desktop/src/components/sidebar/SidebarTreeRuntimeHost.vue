@@ -61,6 +61,7 @@ import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stor
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
@@ -1027,7 +1028,7 @@ function requestPasteTreeClipboard(): boolean {
         if (files.length > 0) toast(t("savedSql.pasted", { count: files.length }), 2000);
         else toast(t("savedSql.nothingToPaste"), 3000);
       })
-      .catch((e: any) => toast(t("savedSql.pasteFailed", { message: e?.message || String(e) }), 5000));
+      .catch((e: unknown) => toast(t("savedSql.pasteFailed", { message: savedSqlErrorMessage(e, t) }), 5000));
     return true;
   }
   if (currentDatabaseType() === "victoriametrics") return false;
@@ -4164,6 +4165,7 @@ function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | nul
   if ((node.type === "database" || node.type === "schema") && hasTreeNodeDatabaseContext(node)) {
     return {
       connectionId: node.connectionId,
+      catalog: node.catalog ?? null,
       database: node.database,
       schema: node.type === "schema" ? node.schema : undefined,
     };
@@ -4171,6 +4173,7 @@ function savedSqlHistoryScopeForNode(node: TreeNode): SavedSqlHistoryScope | nul
   if ((node.type === "table" || node.type === "view") && hasTreeNodeDatabaseContext(node)) {
     return {
       connectionId: node.connectionId,
+      catalog: node.catalog ?? null,
       database: node.database,
       schema: node.schema,
       tableName: node.label,

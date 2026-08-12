@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
@@ -17,7 +18,7 @@ import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilit
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
-import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
@@ -56,6 +57,7 @@ import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@
 const { t } = useI18n();
 const store = useConnectionStore();
 const queryStore = useQueryStore();
+const savedSqlStore = useSavedSqlStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const searchQuery = ref("");
@@ -1016,7 +1018,10 @@ async function locateActiveTabInSidebar() {
   const tab = activeTab.value;
   if (!tab) return;
 
-  const connId = tab.connectionId;
+  const tabTarget = activeTabSidebarTarget(tab);
+  const locatesSavedSql = tabTarget?.type === "saved-sql-file";
+  const savedSqlFile = locatesSavedSql ? savedSqlStore.getFile(tabTarget.savedSqlId) : undefined;
+  const connId = savedSqlFile?.connectionId ?? tab.connectionId;
 
   // Reconnect if the connection was disconnected (children are cleared on disconnect)
   if (connId && !store.connectedIds.has(connId)) {
@@ -1030,8 +1035,6 @@ async function locateActiveTabInSidebar() {
   }
 
   const config = connId ? store.getConfig(connId) : undefined;
-  const tabTarget = activeTabSidebarTarget(tab);
-  const locatesSavedSql = tabTarget?.type === "saved-sql-file";
   const cursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
   const fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, cursorCandidate) ?? tabTarget);
   const initialTarget = cursorCandidate ? tableTargetFromCandidate(cursorCandidate) : fallbackTarget;
@@ -1041,11 +1044,12 @@ async function locateActiveTabInSidebar() {
   // Saved SQL rows live below their database's runtime Queries node. Loading
   // the database context first also makes explicit locate work after reconnect.
   const treeLoadTarget: ActiveTabSidebarTarget =
-    locatesSavedSql && tab.connectionId && tab.database
+    locatesSavedSql && savedSqlFile?.connectionId && savedSqlFile.database
       ? {
           type: "query-context",
-          connectionId: tab.connectionId,
-          database: tab.database,
+          connectionId: savedSqlFile.connectionId,
+          catalog: savedSqlFile.catalog,
+          database: savedSqlFile.database,
         }
       : initialTarget;
   await ensureTreeLoadedForTarget(treeLoadTarget);
@@ -1161,8 +1165,21 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
   if (config.db_type === "mq" || config.db_type === "nacos" || config.db_type === "consul") return;
   if (!("database" in target) || !target.database) return;
 
+  const usesExactCatalogScope = target.type === "query-context";
+  const targetCatalog = usesExactCatalogScope ? target.catalog : undefined;
+  if (usesExactCatalogScope) {
+    const catalogNode = findDorisCatalogNode(store.treeNodes, connId, targetCatalog);
+    if (catalogNode && (force || !catalogNode.children || catalogNode.children.length === 0)) {
+      try {
+        await store.loadDorisCatalogDatabases(catalogNode, loadOptions);
+      } catch {
+        return;
+      }
+    }
+  }
+
   // Find the database node
-  const dbNode = findDatabaseNode(store.treeNodes, connId, target.database);
+  const dbNode = findDatabaseNode(store.treeNodes, connId, target.database, targetCatalog, usesExactCatalogScope);
   if (!dbNode) return;
   const targetSchema = "schema" in target ? target.schema : undefined;
   const databaseChildrenLoaded = !!dbNode.children && dbNode.children.length > 0;
@@ -1231,13 +1248,28 @@ function sameTreeName(left: string | undefined, right: string | undefined): bool
   return (left || "").toLowerCase() === (right || "").toLowerCase();
 }
 
-function findDatabaseNode(nodes: TreeNode[], connId: string, database: string): TreeNode | null {
+function findDorisCatalogNode(nodes: TreeNode[], connId: string, catalog: string | undefined): TreeNode | null {
   for (const node of nodes) {
-    if (node.type === "database" && node.connectionId === connId && sameTreeName(node.database, database)) {
+    if (node.type === "doris-catalog" && node.connectionId === connId) {
+      const matches = catalog ? sameTreeName(node.catalog, catalog) : isInternalDorisCatalog(node.catalogType, node.catalog);
+      if (matches) return node;
+    }
+    if (node.children) {
+      const found = findDorisCatalogNode(node.children, connId, catalog);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function findDatabaseNode(nodes: TreeNode[], connId: string, database: string, catalog?: string, exactCatalog = false): TreeNode | null {
+  for (const node of nodes) {
+    const catalogMatches = !exactCatalog || (catalog ? sameTreeName(node.catalog, catalog) : !node.catalog);
+    if (node.type === "database" && node.connectionId === connId && sameTreeName(node.database, database) && catalogMatches) {
       return node;
     }
     if (node.children) {
-      const found = findDatabaseNode(node.children, connId, database);
+      const found = findDatabaseNode(node.children, connId, database, catalog, exactCatalog);
       if (found) return found;
     }
   }

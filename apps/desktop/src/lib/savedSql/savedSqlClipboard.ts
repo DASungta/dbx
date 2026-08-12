@@ -3,6 +3,7 @@ import type { TreeNode } from "@/types/database";
 
 export interface SavedSqlPasteTarget {
   connectionId: string;
+  catalog?: string;
   database: string;
   schema?: string;
 }
@@ -11,11 +12,12 @@ export function savedSqlClipboardFileIds(nodes: readonly TreeNode[]): string[] {
   return [...new Set(nodes.filter((node) => node.type === "saved-sql-file" && !!node.savedSqlId).map((node) => node.savedSqlId!))];
 }
 
-export function savedSqlPasteTargetForNode(node: Pick<TreeNode, "type" | "connectionId" | "database" | "schema">): SavedSqlPasteTarget | null {
+export function savedSqlPasteTargetForNode(node: Pick<TreeNode, "type" | "connectionId" | "catalog" | "database" | "schema">): SavedSqlPasteTarget | null {
   if (node.type !== "database" && node.type !== "saved-sql-root" && node.type !== "saved-sql-file") return null;
   if (!node.connectionId || node.database === undefined) return null;
   return {
     connectionId: node.connectionId,
+    catalog: node.catalog,
     database: node.database,
     schema: node.schema,
   };

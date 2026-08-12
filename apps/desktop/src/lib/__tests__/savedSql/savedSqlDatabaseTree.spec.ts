@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDatabaseSavedSqlRootNode, decorateDatabaseSavedSqlTreeNodes, savedSqlFilesForDatabase, stripDatabaseSavedSqlTreeNodes } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { buildDatabaseSavedSqlRootNode, decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, savedSqlFilesForDatabase, stripDatabaseSavedSqlTreeNodes } from "@/lib/savedSql/savedSqlDatabaseTree";
 import type { SavedSqlFile, TreeNode } from "@/types/database";
 
 function file(input: Partial<SavedSqlFile> & Pick<SavedSqlFile, "id" | "name" | "connectionId" | "database">): SavedSqlFile {
@@ -34,6 +34,19 @@ describe("savedSqlFilesForDatabase", () => {
     ];
 
     expect(savedSqlFilesForDatabase(copiedFiles, { connectionId: "conn-1", database: "app" }).map((item) => item.name)).toEqual(["query_2.sql", "query_5.sql", "query_5_copy1.sql", "query_5_copy2.sql", "query_5_copy10.sql", "query_10.sql"]);
+  });
+
+  it("separates same-named databases by catalog and indexes all files once", () => {
+    const catalogFiles = [
+      file({ id: "default", name: "default.sql", connectionId: "conn-1", database: "analytics" }),
+      file({ id: "hive", name: "hive.sql", connectionId: "conn-1", catalog: "hive", database: "analytics" }),
+      file({ id: "iceberg", name: "iceberg.sql", connectionId: "conn-1", catalog: "iceberg", database: "analytics" }),
+    ];
+    const index = indexSavedSqlFilesByDatabase(catalogFiles);
+
+    expect(savedSqlFilesForDatabase(index, { connectionId: "conn-1", database: "analytics" }).map((item) => item.id)).toEqual(["default"]);
+    expect(savedSqlFilesForDatabase(index, { connectionId: "conn-1", catalog: "hive", database: "analytics" }).map((item) => item.id)).toEqual(["hive"]);
+    expect(savedSqlFilesForDatabase(index, { connectionId: "conn-1", catalog: "iceberg", database: "analytics" }).map((item) => item.id)).toEqual(["iceberg"]);
   });
 });
 
@@ -72,5 +85,14 @@ describe("database saved SQL tree", () => {
   it("removes runtime saved SQL nodes before metadata is cached", () => {
     const decorated = decorateDatabaseSavedSqlTreeNodes([database], files);
     expect(stripDatabaseSavedSqlTreeNodes(decorated)).toEqual([{ ...database, children: [] }]);
+  });
+
+  it("renders a saved SQL only below its exact catalog database", () => {
+    const catalogFiles = [file({ id: "hive", name: "hive.sql", connectionId: "conn-1", catalog: "hive", database: "app" })];
+    const defaultRoot = buildDatabaseSavedSqlRootNode(database, catalogFiles);
+    const hiveRoot = buildDatabaseSavedSqlRootNode({ ...database, id: "conn-1:hive:app", catalog: "hive" }, catalogFiles);
+
+    expect(defaultRoot?.children).toEqual([]);
+    expect(hiveRoot).toMatchObject({ catalog: "hive", children: [{ catalog: "hive", savedSqlId: "hive" }] });
   });
 });

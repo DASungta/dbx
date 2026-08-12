@@ -1275,6 +1275,8 @@ export interface SavedSqlFolder {
 export interface SavedSqlFile {
   id: string;
   connectionId: string;
+  /** Undefined means the connection's built-in/default catalog. */
+  catalog?: string;
   folderId?: string;
   name: string;
   database: string;

@@ -102,7 +102,7 @@ import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilit
 import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
-import { decorateDatabaseSavedSqlTreeNodes, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
@@ -316,6 +316,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const settingsStore = useSettingsStore();
   const tunnelProfileStore = useTunnelProfileStore();
   const savedSqlStore = useSavedSqlStore();
+  let savedSqlFilesByDatabase = indexSavedSqlFilesByDatabase(savedSqlStore.allFiles);
   const connections = ref<ConnectionConfig[]>([]);
   const isDesktop = isTauriRuntime();
   const activeConnectionId = ref<string | null>(localStorage.getItem(ACTIVE_CONNECTION_STORAGE_KEY));
@@ -1274,9 +1275,9 @@ export const useConnectionStore = defineStore("connection", () => {
   function setChildren(parent: TreeNode, children: TreeNode[]) {
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children);
-    children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlStore.allFiles, parent.children);
+    children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlFilesByDatabase, parent.children);
     if (parent.type === "database") {
-      children = withDatabaseSavedSqlRoot(parent, children, savedSqlStore.allFiles);
+      children = withDatabaseSavedSqlRoot(parent, children, savedSqlFilesByDatabase);
     }
     if (shouldClearDescendantLoadedMarkers(parent, children)) {
       clearDescendantLoadedChildrenMarkers(parent.id);
@@ -1419,15 +1420,18 @@ export const useConnectionStore = defineStore("connection", () => {
   function refreshDatabaseSavedSqlTrees(nodes: TreeNode[] = treeNodes.value) {
     for (const node of nodes) {
       if (node.type === "database") {
-        node.children = withDatabaseSavedSqlRoot(node, node.children || [], savedSqlStore.allFiles);
+        node.children = withDatabaseSavedSqlRoot(node, node.children || [], savedSqlFilesByDatabase);
       }
       if (node.children) refreshDatabaseSavedSqlTrees(node.children);
     }
   }
 
   watch(
-    () => savedSqlStore.version,
-    () => refreshDatabaseSavedSqlTrees(),
+    () => savedSqlStore.treeVersion,
+    () => {
+      savedSqlFilesByDatabase = indexSavedSqlFilesByDatabase(savedSqlStore.allFiles);
+      refreshDatabaseSavedSqlTrees();
+    },
     { flush: "sync" },
   );
 

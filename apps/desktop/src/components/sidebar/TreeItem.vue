@@ -69,6 +69,7 @@ import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 // --- Drag and Drop ---
 import { useDragSort } from "@/composables/useDragSort";
@@ -870,7 +871,7 @@ async function finishRenameSavedSql() {
     const savedSqlStore = useSavedSqlStore();
     await savedSqlStore.renameFile(fileId, ensureSqlExtension(trimmed));
   } catch (e: any) {
-    toast(t("savedSql.renameFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("savedSql.renameFailed", { message: savedSqlErrorMessage(e, t) }), 5000);
   }
 }
 

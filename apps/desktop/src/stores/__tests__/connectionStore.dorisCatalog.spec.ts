@@ -123,7 +123,7 @@ describe("connectionStore Doris catalog tree", () => {
     expect(hiveDatabase.children).toEqual([]);
     expect(icebergDatabase.children?.map((node) => [node.catalog, node.database, node.label])).toEqual([
       ["iceberg", "sales", "orders"],
-      [undefined, "sales", "tree.queries"],
+      ["iceberg", "sales", "tree.queries"],
     ]);
   });
 });

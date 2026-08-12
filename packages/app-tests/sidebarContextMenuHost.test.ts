@@ -156,7 +156,7 @@ test("explicit locate prioritizes the saved SQL row over SQL cursor table naviga
 
   assert.match(locateBody, /const locatesSavedSql = tabTarget\?\.type === "saved-sql-file"/);
   assert.match(locateBody, /const cursorCandidate = locatesSavedSql \? null : queryCursorTableCandidate/);
-  assert.match(locateBody, /locatesSavedSql && tab\.connectionId && tab\.database[\s\S]*?type: "query-context"/);
+  assert.match(locateBody, /locatesSavedSql && savedSqlFile\?\.connectionId && savedSqlFile\.database[\s\S]*?type: "query-context"/);
   assert.match(locateBody, /findNodePathForTarget\(target, store\.treeNodes\)/);
 });
 

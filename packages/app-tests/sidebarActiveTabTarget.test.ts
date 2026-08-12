@@ -428,6 +428,7 @@ test("query tabs target their database node in the sidebar", () => {
   assert.deepEqual(activeTabSidebarTarget(tab), {
     type: "query-context",
     connectionId: "conn-1",
+    catalog: undefined,
     database: "app",
     schema: undefined,
   });
