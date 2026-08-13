@@ -23,6 +23,57 @@ export interface DiffHunk {
 
 const SIMILARITY_THRESHOLD = 0.3;
 const ALIGN_WINDOW = 3;
+const MAX_GLOBAL_ALIGNMENT_CELLS = 10_000;
+const ALIGN_DELETE = 1;
+const ALIGN_INSERT = 2;
+const ALIGN_MODIFY = 3;
+
+const SQL_LINE_KEYWORDS = new Set([
+  "add",
+  "alter",
+  "as",
+  "begin",
+  "check",
+  "cluster",
+  "comment",
+  "constraint",
+  "create",
+  "delete",
+  "distributed",
+  "drop",
+  "else",
+  "end",
+  "engine",
+  "foreign",
+  "from",
+  "group",
+  "having",
+  "if",
+  "index",
+  "insert",
+  "join",
+  "key",
+  "on",
+  "order",
+  "partition",
+  "primary",
+  "references",
+  "return",
+  "returns",
+  "select",
+  "set",
+  "settings",
+  "tablespace",
+  "then",
+  "union",
+  "unique",
+  "update",
+  "using",
+  "values",
+  "when",
+  "where",
+  "with",
+]);
 
 function splitLines(value: string): string[] {
   const lines = value.split("\n");
@@ -68,15 +119,17 @@ function collectSameKindChanges(changes: Change[], startIdx: number, kind: "adde
 }
 
 function levenshteinDistance(a: string, b: string): number {
-  const matrix: number[][] = [];
-  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  let previous = Array.from({ length: a.length + 1 }, (_, index) => index);
+
   for (let i = 1; i <= b.length; i++) {
+    const current = [i];
     for (let j = 1; j <= a.length; j++) {
-      matrix[i][j] = b.charAt(i - 1) === a.charAt(j - 1) ? matrix[i - 1][j - 1] : Math.min(matrix[i - 1][j - 1] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j] + 1);
+      current[j] = b.charAt(i - 1) === a.charAt(j - 1) ? previous[j - 1] : Math.min(previous[j - 1] + 1, current[j - 1] + 1, previous[j] + 1);
     }
+    previous = current;
   }
-  return matrix[b.length][a.length];
+
+  return previous[a.length];
 }
 
 function computeSimilarity(a: string, b: string): number {
@@ -89,61 +142,186 @@ function computeSimilarity(a: string, b: string): number {
 
 type AlignedItem = { type: "modify"; left: string; right: string } | { type: "delete"; left: string } | { type: "insert"; right: string };
 
+type SqlIdentifier = {
+  value: string;
+  rest: string;
+  quoted: boolean;
+};
+
+function readSqlIdentifier(value: string): SqlIdentifier | null {
+  const input = value.trimStart();
+  const opening = input[0];
+  const closing = opening === "[" ? "]" : opening;
+
+  if (opening === "`" || opening === '"' || opening === "[") {
+    let identifier = "";
+    for (let i = 1; i < input.length; i++) {
+      if (input[i] !== closing) {
+        identifier += input[i];
+        continue;
+      }
+      if (input[i + 1] === closing) {
+        identifier += closing;
+        i++;
+        continue;
+      }
+      return { value: identifier, rest: input.slice(i + 1), quoted: true };
+    }
+    return null;
+  }
+
+  const match = input.match(/^([A-Za-z_][A-Za-z0-9_$#@]*)(.*)$/s);
+  if (!match) return null;
+  return { value: match[1], rest: match[2], quoted: false };
+}
+
+function readIdentifierAfterKeyword(line: string, keyword: RegExp): string | null {
+  const match = line.trimStart().match(keyword);
+  if (!match) return null;
+  return readSqlIdentifier(line.trimStart().slice(match[0].length))?.value ?? null;
+}
+
+function ddlLineIdentity(line: string): string | null {
+  const trimmed = line.trimStart();
+
+  const constraint = readIdentifierAfterKeyword(trimmed, /^CONSTRAINT\s+/i);
+  if (constraint !== null) return `constraint:${constraint}`;
+
+  const index = readIdentifierAfterKeyword(trimmed, /^(?:(?:UNIQUE|FULLTEXT|SPATIAL)\s+)?(?:KEY|INDEX)\s+/i);
+  if (index !== null) return `index:${index}`;
+
+  const createdIndex = readIdentifierAfterKeyword(trimmed, /^CREATE\s+(?:(?:UNIQUE|FULLTEXT|SPATIAL)\s+)?INDEX\s+/i);
+  if (createdIndex !== null) return `index:${createdIndex}`;
+
+  if (/^PRIMARY\s+KEY\b/i.test(trimmed)) return "constraint:primary-key";
+
+  const identifier = readSqlIdentifier(trimmed);
+  if (!identifier || !/^\s+/.test(identifier.rest)) return null;
+  const normalizedIdentifier = identifier.quoted ? identifier.value : identifier.value.toLowerCase();
+  if (!identifier.quoted && SQL_LINE_KEYWORDS.has(normalizedIdentifier)) return `keyword:${normalizedIdentifier}`;
+  return `column:${normalizedIdentifier}`;
+}
+
+function linePairSimilarity(left: string, right: string, leftIdentity = ddlLineIdentity(left), rightIdentity = ddlLineIdentity(right)): number | null {
+  if (leftIdentity !== null || rightIdentity !== null) {
+    if (leftIdentity === null || rightIdentity === null || leftIdentity !== rightIdentity) return null;
+  }
+
+  const similarity = computeSimilarity(left, right);
+  return similarity >= SIMILARITY_THRESHOLD ? similarity : null;
+}
+
+function alignWithinWindow(removedLines: string[], addedLines: string[]): AlignedItem[] {
+  const result: AlignedItem[] = [];
+  let r = 0;
+  let a = 0;
+
+  while (r < removedLines.length && a < addedLines.length) {
+    let bestR = -1;
+    let bestA = -1;
+    let bestSimilarity = -1;
+
+    for (let ri = r; ri < Math.min(r + ALIGN_WINDOW, removedLines.length); ri++) {
+      for (let ai = a; ai < Math.min(a + ALIGN_WINDOW, addedLines.length); ai++) {
+        const similarity = linePairSimilarity(removedLines[ri], addedLines[ai]);
+        if (similarity !== null && similarity > bestSimilarity) {
+          bestSimilarity = similarity;
+          bestR = ri;
+          bestA = ai;
+        }
+      }
+    }
+
+    if (bestR < 0 || bestA < 0) {
+      result.push({ type: "delete", left: removedLines[r++] });
+      result.push({ type: "insert", right: addedLines[a++] });
+      continue;
+    }
+
+    while (r < bestR) result.push({ type: "delete", left: removedLines[r++] });
+    while (a < bestA) result.push({ type: "insert", right: addedLines[a++] });
+    result.push({ type: "modify", left: removedLines[r++], right: addedLines[a++] });
+  }
+
+  while (r < removedLines.length) result.push({ type: "delete", left: removedLines[r++] });
+  while (a < addedLines.length) result.push({ type: "insert", right: addedLines[a++] });
+  return result;
+}
+
+function buildGlobalAlignmentDirections(removedLines: string[], addedLines: string[], removedIdentities: Array<string | null>, addedIdentities: Array<string | null>): Uint8Array {
+  const removedCount = removedLines.length;
+  const addedCount = addedLines.length;
+  const directions = new Uint8Array(removedCount * addedCount);
+  let nextCosts = new Float64Array(addedCount + 1);
+
+  for (let a = addedCount - 1; a >= 0; a--) nextCosts[a] = nextCosts[a + 1] + 1;
+
+  for (let r = removedCount - 1; r >= 0; r--) {
+    const currentCosts = new Float64Array(addedCount + 1);
+    currentCosts[addedCount] = nextCosts[addedCount] + 1;
+
+    for (let a = addedCount - 1; a >= 0; a--) {
+      let bestCost = nextCosts[a] + 1;
+      let direction = ALIGN_DELETE;
+
+      const insertCost = currentCosts[a + 1] + 1;
+      if (insertCost < bestCost) {
+        bestCost = insertCost;
+        direction = ALIGN_INSERT;
+      }
+
+      const similarity = linePairSimilarity(removedLines[r], addedLines[a], removedIdentities[r], addedIdentities[a]);
+      if (similarity !== null) {
+        const modifyCost = nextCosts[a + 1] + (1 - similarity);
+        if (modifyCost <= bestCost) {
+          bestCost = modifyCost;
+          direction = ALIGN_MODIFY;
+        }
+      }
+
+      currentCosts[a] = bestCost;
+      directions[r * addedCount + a] = direction;
+    }
+
+    nextCosts = currentCosts;
+  }
+
+  return directions;
+}
+
 function alignLineByLine(removedLines: string[], addedLines: string[]): AlignedItem[] {
+  const removedCount = removedLines.length;
+  const addedCount = addedLines.length;
+  if (removedCount * addedCount > MAX_GLOBAL_ALIGNMENT_CELLS) return alignWithinWindow(removedLines, addedLines);
+
+  const removedIdentities = removedLines.map(ddlLineIdentity);
+  const addedIdentities = addedLines.map(ddlLineIdentity);
+  const directions = buildGlobalAlignmentDirections(removedLines, addedLines, removedIdentities, addedIdentities);
+
   const result: AlignedItem[] = [];
   let r = 0;
   let a = 0;
 
   while (r < removedLines.length || a < addedLines.length) {
-    if (r < removedLines.length && a < addedLines.length) {
-      const directSim = computeSimilarity(removedLines[r], addedLines[a]);
-      if (directSim >= SIMILARITY_THRESHOLD) {
-        result.push({ type: "modify", left: removedLines[r], right: addedLines[a] });
-        r++;
-        a++;
-        continue;
-      }
-
-      // Look ahead for best match within a small window
-      let bestR = -1;
-      let bestA = -1;
-      let bestSim = SIMILARITY_THRESHOLD;
-
-      for (let ri = r; ri < Math.min(r + ALIGN_WINDOW, removedLines.length); ri++) {
-        for (let aj = a; aj < Math.min(a + ALIGN_WINDOW, addedLines.length); aj++) {
-          const sim = computeSimilarity(removedLines[ri], addedLines[aj]);
-          if (sim > bestSim) {
-            bestSim = sim;
-            bestR = ri;
-            bestA = aj;
-          }
-        }
-      }
-
-      if (bestR >= 0 && bestA >= 0) {
-        while (r < bestR) {
-          result.push({ type: "delete", left: removedLines[r] });
-          r++;
-        }
-        while (a < bestA) {
-          result.push({ type: "insert", right: addedLines[a] });
-          a++;
-        }
-        result.push({ type: "modify", left: removedLines[r], right: addedLines[a] });
-        r++;
-        a++;
-      } else {
-        result.push({ type: "delete", left: removedLines[r] });
-        result.push({ type: "insert", right: addedLines[a] });
-        r++;
-        a++;
-      }
-    } else if (r < removedLines.length) {
+    if (r >= removedLines.length) {
+      result.push({ type: "insert", right: addedLines[a] });
+      a++;
+    } else if (a >= addedLines.length) {
       result.push({ type: "delete", left: removedLines[r] });
       r++;
     } else {
-      result.push({ type: "insert", right: addedLines[a] });
-      a++;
+      const direction = directions[r * addedCount + a];
+      if (direction === ALIGN_MODIFY) {
+        result.push({ type: "modify", left: removedLines[r], right: addedLines[a] });
+        r++;
+        a++;
+      } else if (direction === ALIGN_INSERT) {
+        result.push({ type: "insert", right: addedLines[a] });
+        a++;
+      } else {
+        result.push({ type: "delete", left: removedLines[r] });
+        r++;
+      }
     }
   }
 
