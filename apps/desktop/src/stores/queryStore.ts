@@ -46,7 +46,7 @@ import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connect
 import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
-import { appendLargeValueCells, remapLargeValueCells, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
+import { appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
@@ -2782,6 +2782,7 @@ export const useQueryStore = defineStore("query", () => {
         catalog: tableMeta.catalog,
         columns: tableMeta.columns.map((column) => column.name),
         primaryKeys,
+        ...tableDataLargeValuePreviewOptions(effectiveDbType, tableMeta.columns, primaryKeys, limit),
         includeRowId: usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta.tableType),
         whereInput: tab.whereInput,
         orderBy,
@@ -4573,6 +4574,8 @@ export const useQueryStore = defineStore("query", () => {
         queryExecutionLog("info", "execute-multi:start", { traceId, elapsed: elapsed() });
         // Query and data tabs use a tab-scoped pool so repeated executions keep
         // connection-local state and avoid MySQL pool resets on every refresh.
+        const dataTabMeta = tab.mode === "data" ? tableMetaForDataTab(tab) : undefined;
+        const useTableDataPreview = canUseTableDataLargeValuePreview(effectiveDbType, dataTabMeta?.columns ?? [], dataTabMeta?.primaryKeys ?? []);
         const executionOptions = {
           ...(typeof pageLimit === "number"
             ? useAgentResultSession
@@ -4586,10 +4589,11 @@ export const useQueryStore = defineStore("query", () => {
               : { maxRows: pageLimit, fetchSize: pageLimit }
             : { maxRows: agentProtocolQueryResultMaxRows(queryResultMaxRows) }),
           ...(executionClientSessionId ? { clientSessionId: executionClientSessionId } : {}),
-          ...(tab.mode === "data" && effectiveDbType === "mysql"
+          ...(tab.mode === "data" && (effectiveDbType === "mysql" || effectiveDbType === "postgres")
             ? {
                 maxResultBytes: TABLE_DATA_RESULT_MAX_BYTES,
-                resultKeyColumns: tableMetaForDataTab(tab)?.primaryKeys ?? [],
+                resultKeyColumns: dataTabMeta?.primaryKeys ?? [],
+                tableDataPreview: useTableDataPreview,
               }
             : {}),
           timeoutSecs: queryTimeoutSecs,
