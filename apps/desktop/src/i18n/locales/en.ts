@@ -1,5 +1,6 @@
 import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
+import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -2559,6 +2560,7 @@ export default {
     userAdmin: "Users & Privileges",
     openUserAdmin: "Open Users & Privileges",
     processList: "Process List",
+    sqlServerTrace: "Activity Trace",
     serverDashboard: "Server Dashboard",
     damengUsers: "Dameng Users",
     openDamengUsers: "Open Dameng User Admin",
@@ -2967,6 +2969,7 @@ export default {
     copy: "Copy",
     copied: "Copied",
   },
+  sqlServerTrace,
   serverDashboard: {
     title: "Server Dashboard",
     autoRefresh: "Auto-refresh",
@@ -4188,7 +4191,10 @@ export default {
     columnTTL: "TTL",
     binaryStringReadonlyHint: "Binary string values are shown as escaped text in read-only mode; editing raw bytes is not supported.",
     selectedKeys: "Selected keys",
-    selectLoadedGroupKeys: "Select {count} loaded matching keys",
+    selectAllLoaded: "Select all",
+    selectAllLoadedTitle: "Select all keys (Ctrl/Cmd+A)",
+    deselectAll: "Clear",
+    selectLoadedGroupKeys: "Select {count} loaded keys in this folder",
     loadedMatchingKeys: "{count} loaded matching keys",
     fuzzyTreeLimit: "{count} fuzzy matches are shown as a flat list to keep the browser responsive. Refine the search to view the hierarchy.",
     deleteGroup: "Delete group",
@@ -5625,6 +5631,8 @@ export default {
     autoCalculateTotalRows: "Auto-calculate total row count",
     autoCalculateTotalRowsDescription: "Run COUNT(*) automatically after each query to show the total matching rows. Off by default to keep large queries fast — calculate it on demand from the result footer.",
     infiniteScrollDescription: "Automatically load the next batch when scrolling to the bottom.",
+    flatteningMultiLineText: "Flattening Multi-line Text",
+    flatteningMultiLineTextDescription: "Multi-line text merged into single line display, with line breaks shown as ¶ .",
     regexMaxMatchCount: "Maximum select-all matches",
     regexMaxMatchCountDescription: "Limits the number of selections created by Select All Matches; search counting remains complete (100–10000).",
     tableColumnTemplateFields: "New Table Preset Fields",
