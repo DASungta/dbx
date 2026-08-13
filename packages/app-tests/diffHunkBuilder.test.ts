@@ -49,8 +49,57 @@ test("aligns reordered DDL fields only when their identifiers match", () => {
 
   const types = realLineTypes(sourceDdl, targetDdl);
   assert.equal(types.get("left:`created_at` bigint(20) DEFAULT NULL,"), "delete");
-  assert.equal(types.get("left:`name` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,"), "delete");
-  assert.equal(types.get("right:`name` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,"), "insert");
+  assert.equal(types.get("left:`name` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,"), "equal");
+  assert.equal(types.get("right:`name` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,"), "equal");
+});
+
+test("does not show an unchanged field as deleted when only its position changes", () => {
+  const sourceDdl = [
+    "CREATE TABLE `skills` (",
+    "  `content` longtext,",
+    "  `created_at` bigint(20) DEFAULT NULL,",
+    "  `created_by` varchar(128) DEFAULT NULL,",
+    "  `description` varchar(1024) NOT NULL,",
+    "  `name` varchar(64) NOT NULL,",
+    "  `skill_id` bigint(20) NOT NULL,",
+    "  `version` int(11) NOT NULL,",
+    "  `markdown` longtext,",
+    "  `model` varchar(128) DEFAULT NULL",
+    ");",
+  ].join("\n");
+  const targetDdl = [
+    "CREATE TABLE `skills` (",
+    "  `content` longtext,",
+    "  `created_by` varchar(128) DEFAULT NULL,",
+    "  `description` varchar(1024) NOT NULL,",
+    "  `name` varchar(64) NOT NULL,",
+    "  `skill_id` bigint(20) NOT NULL,",
+    "  `version` int(11) NOT NULL,",
+    "  `created_at` bigint(20) DEFAULT NULL,",
+    "  `markdown` longtext,",
+    "  `model` varchar(128) DEFAULT NULL",
+    ");",
+  ].join("\n");
+
+  const types = realLineTypes(sourceDdl, targetDdl);
+  assert.equal(types.get("left:`created_at` bigint(20) DEFAULT NULL,"), "equal");
+  assert.equal(types.get("right:`created_at` bigint(20) DEFAULT NULL,"), "equal");
+});
+
+test("shows a moved field as modified when its definition also changes", () => {
+  const source = ["`created_at` bigint(20) DEFAULT NULL,", "`name` varchar(64) NOT NULL"].join("\n");
+  const target = ["`name` varchar(64) NOT NULL", "`created_at` bigint(20) NOT NULL"].join("\n");
+  const hunks = buildHunks(source, target);
+  const createdAtLines = hunks.flatMap((hunk) => [...hunk.leftLines, ...hunk.rightLines]).filter((line) => !line.isPadding && line.content.includes("`created_at`"));
+
+  assert.deepEqual(
+    createdAtLines.map((line) => line.type),
+    ["modify", "modify"],
+  );
+  assert.deepEqual(
+    createdAtLines.map((line) => line.comparisonContent),
+    ["`created_at` bigint(20) NOT NULL", "`created_at` bigint(20) DEFAULT NULL,"],
+  );
 });
 
 test.each([

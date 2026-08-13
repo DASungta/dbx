@@ -7,6 +7,7 @@ export interface DiffLine {
   content: string;
   lineNumber: number | null;
   isPadding: boolean;
+  comparisonContent?: string;
 }
 
 export interface DiffHunk {
@@ -202,6 +203,14 @@ function ddlLineIdentity(line: string): string | null {
   return `column:${normalizedIdentifier}`;
 }
 
+function isNamedDdlIdentity(identity: string | null): identity is string {
+  return identity !== null && (identity.startsWith("column:") || identity.startsWith("constraint:") || identity.startsWith("index:"));
+}
+
+function comparableDdlLine(line: string): string {
+  return line.trim().replace(/,\s*$/, "");
+}
+
 function linePairSimilarity(left: string, right: string, leftIdentity = ddlLineIdentity(left), rightIdentity = ddlLineIdentity(right)): number | null {
   if (leftIdentity !== null || rightIdentity !== null) {
     if (leftIdentity === null || rightIdentity === null || leftIdentity !== rightIdentity) return null;
@@ -326,6 +335,56 @@ function alignLineByLine(removedLines: string[], addedLines: string[]): AlignedI
   }
 
   return result;
+}
+
+type DiffLineReference = {
+  line: DiffLine;
+  identity: string;
+};
+
+function collectChangedLineReferences(hunks: DiffHunk[], side: "leftLines" | "rightLines", hunkType: "delete" | "insert"): DiffLineReference[] {
+  const references: DiffLineReference[] = [];
+
+  for (const hunk of hunks) {
+    if (hunk.type !== hunkType) continue;
+    for (const line of hunk[side]) {
+      if (line.isPadding || line.type !== hunkType) continue;
+      const identity = ddlLineIdentity(line.content);
+      if (isNamedDdlIdentity(identity)) references.push({ line, identity });
+    }
+  }
+
+  return references;
+}
+
+function reconcileMovedDdlLines(hunks: DiffHunk[]): void {
+  const deletedLines = collectChangedLineReferences(hunks, "leftLines", "delete");
+  const insertedByIdentity = new Map<string, DiffLineReference[]>();
+
+  for (const reference of collectChangedLineReferences(hunks, "rightLines", "insert")) {
+    const matches = insertedByIdentity.get(reference.identity) ?? [];
+    matches.push(reference);
+    insertedByIdentity.set(reference.identity, matches);
+  }
+
+  for (const deleted of deletedLines) {
+    const matches = insertedByIdentity.get(deleted.identity);
+    if (!matches?.length) continue;
+
+    const exactIndex = matches.findIndex((inserted) => comparableDdlLine(inserted.line.content) === comparableDdlLine(deleted.line.content));
+    const inserted = matches.splice(exactIndex >= 0 ? exactIndex : 0, 1)[0];
+
+    if (comparableDdlLine(deleted.line.content) === comparableDdlLine(inserted.line.content)) {
+      deleted.line.type = "equal";
+      inserted.line.type = "equal";
+      continue;
+    }
+
+    deleted.line.type = "modify";
+    inserted.line.type = "modify";
+    deleted.line.comparisonContent = inserted.line.content;
+    inserted.line.comparisonContent = deleted.line.content;
+  }
 }
 
 export function buildHunks(sourceDdl: string, targetDdl: string): DiffHunk[] {
@@ -460,6 +519,7 @@ export function buildHunks(sourceDdl: string, targetDdl: string): DiffHunk[] {
     }
   }
 
+  reconcileMovedDdlLines(hunks);
   return hunks;
 }
 
