@@ -22,12 +22,12 @@ pub struct SavedSqlFolder {
 pub struct SavedSqlFile {
     pub id: String,
     pub connection_id: String,
-    /// `None` is the built-in/default catalog and preserves legacy saved SQL scope.
-    #[serde(default)]
-    pub catalog: Option<String>,
     pub folder_id: Option<String>,
     pub name: String,
     pub database: String,
+    /// `None` is the built-in/default catalog and preserves legacy saved SQL scope.
+    #[serde(default)]
+    pub catalog: Option<String>,
     pub schema: Option<String>,
     pub sql: String,
     #[serde(default = "default_sql_loaded")]

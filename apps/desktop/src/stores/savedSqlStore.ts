@@ -20,18 +20,18 @@ interface SavedSqlState {
 interface SaveFileInput {
   id?: string;
   connectionId: string;
-  catalog?: string;
   folderId?: string;
   name: string;
   database: string;
+  catalog?: string;
   schema?: string;
   sql: string;
 }
 
 interface SavedSqlExecutionTargetInput {
   connectionId: string;
-  catalog?: string;
   database: string;
+  catalog?: string;
   schema?: string;
 }
 
