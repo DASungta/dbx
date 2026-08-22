@@ -8,6 +8,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { useDiffScrollSync } from "@/composables/useDiffScrollSync";
 import { buildHunks, type DiffLine } from "@/components/diff/DiffHunkBuilder";
+import { buildSchemaDiffHighlightSegments, type SchemaDiffHighlightSegment } from "@/lib/schema/schemaDiffHighlight";
 import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
 import { FileCode, ScrollText, Copy, Play, FileDiff } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
@@ -89,7 +90,7 @@ const { syncScroll: rollbackSyncScroll, measureHunks: rollbackMeasureHunks } = u
 });
 
 function collectModifySegments(diffHunks: ReturnType<typeof buildHunks>) {
-  const map = new Map<string, { leftSegments: Segment[]; rightSegments: Segment[] }>();
+  const map = new Map<string, { leftSegments: SchemaDiffHighlightSegment[]; rightSegments: SchemaDiffHighlightSegment[] }>();
   for (const hunk of diffHunks) {
     for (let i = 0; i < hunk.leftLines.length; i++) {
       const left = hunk.leftLines[i];
@@ -99,13 +100,13 @@ function collectModifySegments(diffHunks: ReturnType<typeof buildHunks>) {
         map.set(key, renderModifyLine(left, right));
       } else if (left.type === "modify" && !left.isPadding && left.comparisonContent !== undefined) {
         map.set(key, {
-          leftSegments: renderModifyContent(left.content, left.comparisonContent).sourceSegments,
+          leftSegments: buildSchemaDiffHighlightSegments(left.content, left.comparisonContent).sourceSegments,
           rightSegments: [],
         });
       } else if (right.type === "modify" && !right.isPadding && right.comparisonContent !== undefined) {
         map.set(key, {
           leftSegments: [],
-          rightSegments: renderModifyContent(right.comparisonContent, right.content).targetSegments,
+          rightSegments: buildSchemaDiffHighlightSegments(right.comparisonContent, right.content).targetSegments,
         });
       }
     }
@@ -225,84 +226,9 @@ function lineTextClass(line: DiffLine): string {
   return "";
 }
 
-function computeCharDiffs(source: string, target: string): { source: string; target: string }[] {
-  const result: { source: string; target: string }[] = [];
-  let sIdx = 0;
-  let tIdx = 0;
-  while (sIdx < source.length || tIdx < target.length) {
-    if (sIdx >= source.length) {
-      result.push({ source: "", target: target.substring(tIdx) });
-      break;
-    }
-    if (tIdx >= target.length) {
-      result.push({ source: source.substring(sIdx), target: "" });
-      break;
-    }
-    if (source[sIdx] === target[tIdx]) {
-      let matchLen = 0;
-      while (sIdx + matchLen < source.length && tIdx + matchLen < target.length && source[sIdx + matchLen] === target[tIdx + matchLen]) {
-        matchLen++;
-      }
-      result.push({
-        source: source.substring(sIdx, sIdx + matchLen),
-        target: target.substring(tIdx, tIdx + matchLen),
-      });
-      sIdx += matchLen;
-      tIdx += matchLen;
-    } else {
-      let sMatch = -1;
-      let tMatch = -1;
-      for (let i = 0; i < Math.min(10, source.length - sIdx, target.length - tIdx); i++) {
-        if (source[sIdx + i] === target[tIdx]) {
-          sMatch = i;
-          tMatch = 0;
-          break;
-        }
-        if (source[sIdx] === target[tIdx + i]) {
-          sMatch = 0;
-          tMatch = i;
-          break;
-        }
-      }
-      if (sMatch === -1) {
-        sMatch = Math.min(1, source.length - sIdx);
-        tMatch = Math.min(1, target.length - tIdx);
-      }
-      result.push({
-        source: source.substring(sIdx, sIdx + (sMatch > 0 ? sMatch : 1)),
-        target: target.substring(tIdx, tIdx + (tMatch > 0 ? tMatch : 1)),
-      });
-      sIdx += sMatch > 0 ? sMatch : 1;
-      tIdx += tMatch > 0 ? tMatch : 1;
-    }
-  }
-  return result;
-}
-
-function renderModifyLine(leftLine: DiffLine, rightLine: DiffLine): { leftSegments: Segment[]; rightSegments: Segment[] } {
-  const { sourceSegments, targetSegments } = renderModifyContent(leftLine.content, rightLine.content);
+function renderModifyLine(leftLine: DiffLine, rightLine: DiffLine): { leftSegments: SchemaDiffHighlightSegment[]; rightSegments: SchemaDiffHighlightSegment[] } {
+  const { sourceSegments, targetSegments } = buildSchemaDiffHighlightSegments(leftLine.content, rightLine.content);
   return { leftSegments: sourceSegments, rightSegments: targetSegments };
-}
-
-function renderModifyContent(source: string, target: string): { sourceSegments: Segment[]; targetSegments: Segment[] } {
-  const charDiffs = computeCharDiffs(source, target);
-  const leftSegments: Segment[] = [];
-  const rightSegments: Segment[] = [];
-  for (const cd of charDiffs) {
-    if (cd.source === cd.target) {
-      leftSegments.push({ text: cd.source, changed: false });
-      rightSegments.push({ text: cd.target, changed: false });
-    } else {
-      if (cd.source) leftSegments.push({ text: cd.source, changed: true });
-      if (cd.target) rightSegments.push({ text: cd.target, changed: true });
-    }
-  }
-  return { sourceSegments: leftSegments, targetSegments: rightSegments };
-}
-
-interface Segment {
-  text: string;
-  changed: boolean;
 }
 
 function copyDeploySql() {
