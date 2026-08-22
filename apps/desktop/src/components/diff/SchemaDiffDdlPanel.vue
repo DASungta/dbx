@@ -386,19 +386,11 @@ function copyDeploySqlAll() {
           <!-- Source DDL -->
           <Pane min-size="20">
             <div ref="leftPaneRef" class="h-full overflow-y-auto border-r" @scroll="handleScroll('left')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("diff.sourceDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.leftLines"
-                  :key="`l-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -418,19 +410,11 @@ function copyDeploySqlAll() {
           <!-- Target DDL -->
           <Pane min-size="20">
             <div ref="rightPaneRef" class="h-full overflow-y-auto" @scroll="handleScroll('right')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("diff.targetDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.rightLines"
-                  :key="`r-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -462,19 +446,11 @@ function copyDeploySqlAll() {
         <Splitpanes class="h-full" @resized="rollbackOnSplitpanesResized">
           <Pane min-size="20">
             <div ref="rollbackLeftPaneRef" class="h-full overflow-y-auto border-r" @scroll="rollbackHandleScroll('left')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("rollbackComparison.forwardSql") }}
               </div>
               <div v-for="hunk in rollbackHunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.leftLines"
-                  :key="`l-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -492,19 +468,11 @@ function copyDeploySqlAll() {
           </Pane>
           <Pane min-size="20">
             <div ref="rollbackRightPaneRef" class="h-full overflow-y-auto" @scroll="rollbackHandleScroll('right')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("rollbackComparison.rollbackSql") }}
               </div>
               <div v-for="hunk in rollbackHunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.rightLines"
-                  :key="`r-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>

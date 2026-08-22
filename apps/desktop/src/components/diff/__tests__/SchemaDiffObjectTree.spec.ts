@@ -23,7 +23,10 @@ describe("SchemaDiffObjectTree", () => {
           type: "modified",
           objectType: "table",
           name: "users",
-          columns: [{ type: "added", name: "nickname" }],
+          columns: [
+            { type: "modified", name: "email" },
+            { type: "added", name: "nickname" },
+          ],
           indexes: [{ type: "removed", name: "idx_legacy" }],
         },
       ]),
@@ -52,10 +55,17 @@ describe("SchemaDiffObjectTree", () => {
     expect(host.textContent).toContain("diff.operationLabel.delete");
     expect(host.textContent).not.toContain("database");
 
-    const createTableName = Array.from(host.querySelectorAll("span")).find((element) => element.textContent === "users");
-    const createTableRow = createTableName?.closest(".grid") as HTMLElement;
-    (createTableRow.querySelector("button") as HTMLButtonElement).click();
+    const tableExpandButtons = new Set(
+      Array.from(host.querySelectorAll("span"))
+        .filter((element) => element.textContent === "users")
+        .map((element) => element.closest(".grid")?.querySelector("button") as HTMLButtonElement),
+    );
+    for (const button of tableExpandButtons) button.click();
     await nextTick();
+
+    const emailSides = Array.from(host.querySelectorAll("span")).filter((element) => element.textContent === "email");
+    expect(emailSides).toHaveLength(2);
+    expect(emailSides.every((element) => element.parentElement?.classList.contains("pl-7"))).toBe(true);
 
     const nickname = Array.from(host.querySelectorAll("span")).find((element) => element.textContent === "nickname");
     expect(nickname).toBeTruthy();

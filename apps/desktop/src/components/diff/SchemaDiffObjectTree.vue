@@ -216,7 +216,7 @@ function targetObjectName(object: SchemaDiffObject): string {
               <div class="flex justify-center">
                 <component :is="operationIcons[child.operationType]" class="w-3.5 h-3.5" :class="operationColors[child.operationType]" />
               </div>
-              <div v-if="child.operationType !== 'create'" class="flex items-center gap-2 min-w-0" :class="child.operationType === 'delete' ? 'pl-7' : ''">
+              <div v-if="child.operationType !== 'create'" class="flex items-center gap-2 min-w-0 pl-7">
                 <input v-if="child.operationType === 'delete'" type="checkbox" class="accent-primary shrink-0" :checked="child.selected" @click.stop @change="onObjectCheckboxChange(child, $event)" />
                 <component :is="getObjectIcon(child.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(child.objectKind)" />
                 <span class="text-xs truncate" :class="child.operationType === 'delete' ? 'text-red-500 line-through' : ''">{{ targetObjectName(child) }}</span>
