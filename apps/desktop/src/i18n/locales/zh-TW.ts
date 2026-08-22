@@ -4627,6 +4627,7 @@ export default withEnglishFallback({
       index: "索引",
       foreignKey: "外鍵",
       trigger: "觸發器",
+      tableOption: "資料表選項",
     },
     recentConfigs: "最近配置",
     selectRecentConfig: "選擇最近配置",

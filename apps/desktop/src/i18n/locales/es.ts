@@ -5365,6 +5365,7 @@ export default withEnglishFallback({
       index: "Índice",
       foreignKey: "Clave foránea",
       trigger: "Disparador",
+      tableOption: "Opciones de tabla",
     },
     noObjectsSelected: "Selecciona objetos para desplegar",
     deploySuccess: "Despliegue exitoso",

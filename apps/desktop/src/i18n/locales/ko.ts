@@ -5083,6 +5083,7 @@ export default withEnglishFallback({
       index: "인덱스",
       foreignKey: "외래 키",
       trigger: "트리거",
+      tableOption: "테이블 옵션",
     },
     noObjectsSelected: "배포할 객체를 선택하세요",
     deploySuccess: "배포 성공",

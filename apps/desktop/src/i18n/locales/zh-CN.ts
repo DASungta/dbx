@@ -5604,6 +5604,7 @@ export default withEnglishFallback({
       index: "索引",
       foreignKey: "外键",
       trigger: "触发器",
+      tableOption: "表选项",
     },
     noObjectsSelected: "请选择要部署的对象",
     deploySuccess: "部署成功",

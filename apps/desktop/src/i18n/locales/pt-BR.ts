@@ -5367,6 +5367,7 @@ export default withEnglishFallback({
       index: "Índice",
       foreignKey: "Chave Estrangeira",
       trigger: "Gatilho",
+      tableOption: "Opções da tabela",
     },
     noObjectsSelected: "Selecione objetos para implantar",
     deploySuccess: "Implantação Bem-sucedida",

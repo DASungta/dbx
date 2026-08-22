@@ -5365,6 +5365,7 @@ export default withEnglishFallback({
       index: "Indice",
       foreignKey: "Chiave Esterna",
       trigger: "Trigger",
+      tableOption: "Opzioni tabella",
     },
     noObjectsSelected: "Seleziona gli oggetti da distribuire",
     deploySuccess: "Deploy Riuscito",

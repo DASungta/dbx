@@ -187,6 +187,7 @@ export const listExtensions = forward("listExtensions");
 export const listAvailableExtensions = forward("listAvailableExtensions");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
+export const generateSchemaSyncPlan = forward("generateSchemaSyncPlan");
 export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Docs

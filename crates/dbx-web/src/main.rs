@@ -445,6 +445,7 @@ async fn main() {
         .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
+        .route("/schema-diff/generate-sync-plan", post(routes::schema_diff::generate_schema_sync_plan))
         .route(
             "/schema/cache",
             post(routes::schema_cache::save_schema_cache).get(routes::schema_cache::load_schema_cache),
