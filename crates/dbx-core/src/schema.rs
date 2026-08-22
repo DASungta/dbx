@@ -3816,6 +3816,20 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn oracle_metadata_object_source_is_limited_to_supported_kinds() {
+        let oracle = test_connection_config(DatabaseType::Oracle);
+        let postgres = test_connection_config(DatabaseType::Postgres);
+
+        for object_type in
+            [db::ObjectSourceKind::Sequence, db::ObjectSourceKind::Package, db::ObjectSourceKind::PackageBody]
+        {
+            assert!(super::uses_oracle_metadata_object_source(Some(&oracle), &object_type));
+        }
+        assert!(!super::uses_oracle_metadata_object_source(Some(&postgres), &db::ObjectSourceKind::Sequence,));
+        assert!(!super::uses_oracle_metadata_object_source(Some(&oracle), &db::ObjectSourceKind::View,));
+    }
+
+    #[test]
     fn agent_table_paging_supports_tdengine_and_default_oracle_only() {
         assert!(super::supports_agent_table_paging(&test_connection_config(DatabaseType::Tdengine)));
         assert!(super::supports_agent_table_paging(&test_connection_config(DatabaseType::Oracle)));
@@ -7323,6 +7337,14 @@ fn is_default_oracle_agent_config(config: &ConnectionConfig) -> bool {
         && !matches!(config.driver_profile.as_deref(), Some("oracle-legacy" | "oracle-10g"))
 }
 
+fn uses_oracle_metadata_object_source(config: Option<&ConnectionConfig>, object_type: &db::ObjectSourceKind) -> bool {
+    config.is_some_and(|config| config.db_type == DatabaseType::Oracle)
+        && matches!(
+            object_type,
+            db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody
+        )
+}
+
 fn supports_agent_table_paging(config: &ConnectionConfig) -> bool {
     // Keep paging opt-in until each legacy agent is known to apply metadata constraints server-side.
     matches!(config.db_type, DatabaseType::Tdengine) || is_default_oracle_agent_config(config)
@@ -8293,9 +8315,7 @@ async fn get_object_source_once(
             first_string_cell(result?)?
         } else if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
             drop(connections);
-            if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle)
-                && matches!(object_type, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody)
-            {
+            if uses_oracle_metadata_object_source(db_config.as_ref(), &object_type) {
                 oracle_agent_object_source(
                     client,
                     database,
@@ -8419,8 +8439,8 @@ pub fn oracle_list_objects_sql(schema: &str) -> String {
     format!(
         "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE object_type END AS object_type, owner \
          FROM all_objects \
-         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY') \
-         ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'PACKAGE' THEN 4 ELSE 5 END, object_name",
+         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY') \
+         ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'SEQUENCE' THEN 4 WHEN 'PACKAGE' THEN 5 ELSE 6 END, object_name",
         oracle_owner_filter(schema)
     )
 }
@@ -9070,6 +9090,10 @@ mod object_source_tests {
             oracle_object_source_sql("", "PAYROLL", &ObjectSourceKind::Package),
             "SELECT DBMS_METADATA.GET_DDL('PACKAGE', 'PAYROLL') FROM DUAL"
         );
+        assert_eq!(
+            oracle_object_source_sql("HR", "ORDER_SEQ", &ObjectSourceKind::Sequence),
+            "SELECT DBMS_METADATA.GET_DDL('SEQUENCE', 'ORDER_SEQ', 'HR') FROM DUAL"
+        );
     }
 
     #[test]
@@ -9078,6 +9102,7 @@ mod object_source_tests {
 
         assert!(sql.contains("'PACKAGE'"));
         assert!(sql.contains("'PACKAGE BODY'"));
+        assert!(sql.contains("'SEQUENCE'"));
         assert!(sql.contains("CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'"));
         assert!(sql.contains("owner = 'HR'"));
     }

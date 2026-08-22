@@ -25,8 +25,13 @@ export interface SqlBracedParameter extends SqlParameterDescriptor {
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
-  replacement?: "string-fragment" | "mybatis-foreach";
+  replacement?: "string-fragment" | "mybatis-foreach" | "mybatis-where";
   foreach?: MyBatisForeach;
+  where?: MyBatisWhere;
+}
+
+interface MyBatisWhere {
+  body: string;
 }
 
 interface MyBatisForeach {
@@ -176,6 +181,10 @@ export function extractSqlParameterDescriptors(sql: string, options?: SqlParamet
     descriptors.push(descriptor);
   };
   for (const occurrence of findSqlParameterOccurrences(sql, options)) {
+    if (occurrence.replacement === "mybatis-where" && occurrence.where) {
+      for (const nested of extractSqlParameterDescriptors(occurrence.where.body, options)) appendDescriptor(nested);
+      continue;
+    }
     appendDescriptor({
       key: occurrence.key,
       name: occurrence.name,
@@ -201,6 +210,11 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   let cursor = 0;
   for (const occurrence of occurrences) {
     result += sql.slice(cursor, occurrence.start);
+    if (occurrence.replacement === "mybatis-where" && occurrence.where) {
+      result += renderMyBatisWhere(occurrence.where, values, options);
+      cursor = occurrence.end;
+      continue;
+    }
     const input = values[occurrence.key] ?? { kind: "string", value: "" };
     if (occurrence.replacement === "mybatis-foreach" && occurrence.foreach) {
       result += renderMyBatisForeach(occurrence.foreach, input, values, options);
@@ -214,6 +228,14 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   }
   result += sql.slice(cursor);
   return decodeMyBatisEntities ? decodeMyBatisXmlComparisonEntities(result) : result;
+}
+
+const MYBATIS_WHERE_LEADING_CONJUNCTION_RE = /^(?:AND|OR)\s+/i;
+
+function renderMyBatisWhere(where: MyBatisWhere, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
+  const body = substituteSqlParameters(where.body, values, options).trim();
+  if (!body) return "";
+  return `WHERE ${body.replace(MYBATIS_WHERE_LEADING_CONJUNCTION_RE, "")}`;
 }
 
 function renderMyBatisForeach(foreach: MyBatisForeach, input: SqlParameterInput, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
@@ -385,6 +407,21 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         i = foreach.end;
         continue;
       }
+      const where = readMyBatisWhereAt(sql, i);
+      if (where) {
+        occurrences.push({
+          key: "",
+          name: "",
+          syntax: "mybatis",
+          token: "<where>",
+          replacement: "mybatis-where",
+          where: { body: where.body },
+          start: i,
+          end: where.end,
+        });
+        i = where.end;
+        continue;
+      }
     }
 
     if (ch === "'" || ch === '"') {
@@ -519,7 +556,7 @@ function readMyBatisForeachAt(sql: string, start: number): { collection: string;
   const index = attributes.get("index")?.trim();
   if (!PARAMETER_NAME_RE.test(collection) || !PARAMETER_NAME_RE.test(item) || (index !== undefined && !PARAMETER_NAME_RE.test(index))) return null;
 
-  const close = findMatchingForeachClose(sql, openingEnd + 1);
+  const close = findMatchingXmlTagClose(sql, openingEnd + 1, "foreach");
   if (!close) return null;
   return {
     collection,
@@ -533,6 +570,16 @@ function readMyBatisForeachAt(sql: string, start: number): { collection: string;
     },
     end: close.end,
   };
+}
+
+function readMyBatisWhereAt(sql: string, start: number): { body: string; end: number } | null {
+  if (!/^<where(?:\s|>)/i.test(sql.slice(start))) return null;
+  const openingEnd = findXmlTagEnd(sql, start);
+  if (openingEnd === -1) return null;
+
+  const close = findMatchingXmlTagClose(sql, openingEnd + 1, "where");
+  if (!close) return null;
+  return { body: sql.slice(openingEnd + 1, close.start), end: close.end };
 }
 
 function findXmlTagEnd(source: string, start: number): number {
@@ -577,7 +624,7 @@ function decodeXmlAttribute(value: string): string {
   return value.replace(/&(?:lt|gt|amp|quot|apos);/g, (entity) => ({ "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": '"', "&apos;": "'" })[entity] ?? entity);
 }
 
-function findMatchingForeachClose(sql: string, start: number): { start: number; end: number } | null {
+function findMatchingXmlTagClose(sql: string, start: number, tagName: string): { start: number; end: number } | null {
   let depth = 1;
   let i = start;
 
@@ -614,7 +661,7 @@ function findMatchingForeachClose(sql: string, start: number): { start: number; 
       }
     }
     if (ch === "<") {
-      const tag = readForeachTagAt(sql, i);
+      const tag = readXmlTagAt(sql, i, tagName);
       if (tag) {
         depth += tag.closing ? -1 : 1;
         if (depth === 0) return { start: i, end: tag.end };
@@ -627,11 +674,11 @@ function findMatchingForeachClose(sql: string, start: number): { start: number; 
   return null;
 }
 
-function readForeachTagAt(sql: string, start: number): { closing: boolean; end: number } | null {
+function readXmlTagAt(sql: string, start: number, tagName: string): { closing: boolean; end: number } | null {
   const closing = sql[start + 1] === "/";
   const nameStart = start + (closing ? 2 : 1);
-  if (sql.slice(nameStart, nameStart + "foreach".length).toLowerCase() !== "foreach") return null;
-  const boundary = sql[nameStart + "foreach".length];
+  if (sql.slice(nameStart, nameStart + tagName.length).toLowerCase() !== tagName) return null;
+  const boundary = sql[nameStart + tagName.length];
   if (boundary !== ">" && !/\s/.test(boundary ?? "")) return null;
   const tagEnd = findXmlTagEnd(sql, start);
   return tagEnd === -1 ? null : { closing, end: tagEnd + 1 };

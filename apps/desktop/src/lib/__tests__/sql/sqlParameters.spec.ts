@@ -666,6 +666,56 @@ describe("substituteSqlParameters", () => {
     expect(substituteSqlParameters(sql, {}, { enabledSyntaxes: ["shell"] })).toBe(sql);
   });
 
+  it("strips a MyBatis <where> wrapper and prefixes its body with WHERE", () => {
+    const sql = "select * from tasks <where> status = #{status} </where>";
+
+    expect(substituteSqlParameters(sql, { status: { kind: "string", value: "open" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks WHERE status = 'open'");
+  });
+
+  it("strips a leading AND/OR from a MyBatis <where> body, case-insensitively", () => {
+    const andSql = "select * from tasks <where> AND status = #{status} </where>";
+    const orSql = "select * from tasks <where> or status = #{status} </where>";
+
+    expect(substituteSqlParameters(andSql, { status: { kind: "string", value: "open" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks WHERE status = 'open'");
+    expect(substituteSqlParameters(orSql, { status: { kind: "string", value: "open" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks WHERE status = 'open'");
+  });
+
+  it("renders an empty MyBatis <where> body as no WHERE clause at all", () => {
+    const sql = "select * from tasks <where>   </where> order by id";
+
+    expect(substituteSqlParameters(sql, {}, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks  order by id");
+  });
+
+  it("does not surface <where> itself as a SQL parameter, but does surface placeholders nested inside it", () => {
+    const sql = "select * from tasks <where> status = #{status} </where>";
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([{ key: "status", name: "status", syntax: "mybatis", token: "#{status}" }]);
+  });
+
+  it("resolves a MyBatis <foreach> nested inside a <where> wrapper", () => {
+    const sql = 'select * from tasks <where> task_id in <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach> </where>';
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["mybatis"] })).toEqual([{ key: "taskIds", name: "taskIds", syntax: "mybatis", token: "<foreach>", collection: true }]);
+    expect(substituteSqlParameters(sql, { taskIds: { kind: "number", value: "[1,2]" } }, { enabledSyntaxes: ["mybatis"] })).toBe("select * from tasks WHERE task_id in (1,2)");
+  });
+
+  it("ignores where-like tags in SQL strings and comments when matching the closing tag", () => {
+    const sql = `select * from tasks <where>
+      status = #{status} /* </where> */ || '<where>fake</where>'
+      -- <where>fake</where>
+    </where>`;
+
+    expect(substituteSqlParameters(sql, { status: { kind: "string", value: "open" } }, { enabledSyntaxes: ["mybatis"] })).toBe(`select * from tasks WHERE status = 'open' /* </where> */ || '<where>fake</where>'
+      -- <where>fake</where>`);
+  });
+
+  it("leaves MyBatis <where> tags untouched when MyBatis substitution is disabled", () => {
+    const sql = "select * from tasks <where> status = #{status} </where>";
+
+    expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["shell"] })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { enabledSyntaxes: ["shell"] })).toBe(sql);
+  });
+
   it("decodes XML comparison entities when substituting MyBatis parameters", () => {
     const sql = "select * from orders where created_at &gt;= #{start} and created_at &lt; #{end} and owner_id = #{owner_id} or reviewer_id = #{owner_id}";
 
