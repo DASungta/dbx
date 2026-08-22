@@ -3,6 +3,8 @@ mod data_dir;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
+#[cfg(target_os = "macos")]
+mod macos_escape_guard;
 mod models;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
@@ -1488,6 +1490,8 @@ pub fn run() {
             commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
+            #[cfg(target_os = "macos")]
+            macos_escape_guard::install_escape_fullscreen_guard();
             #[cfg(target_os = "windows")]
             webview2_recovery::install(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
@@ -1673,6 +1677,7 @@ pub fn run() {
             commands::schema::get_all_columns,
             commands::schema::get_sqlserver_column_metadata,
             commands::schema::list_indexes,
+            commands::schema::list_reference_key_columns,
             commands::schema::list_foreign_keys,
             commands::schema::list_triggers,
             commands::schema::list_constraints,
@@ -1685,6 +1690,7 @@ pub fn run() {
             commands::schema::list_sequences,
             commands::schema::list_rules,
             commands::schema::list_owners,
+            commands::schema::get_table_owner,
             commands::schema::list_extensions,
             commands::schema::list_available_extensions,
             commands::schema_diff::prepare_schema_diff,
@@ -1726,6 +1732,8 @@ pub fn run() {
             commands::query::build_database_search_sql,
             commands::query::build_search_result_where,
             commands::query::build_rename_object_sql,
+            commands::query::build_rename_database_sql,
+            commands::query::build_rename_database_preflight_sql,
             commands::query::build_create_database_sql,
             #[cfg(feature = "duckdb-sidecar")]
             commands::query::build_duckdb_attach_database_sql,
@@ -1749,6 +1757,7 @@ pub fn run() {
             commands::query::build_routine_rename_object_source_statements,
             commands::query::build_view_ddl_sql,
             commands::query::build_table_structure_change_sql,
+            commands::query::build_table_owner_change_sql,
             commands::query::preview_sqlite_table_structure_change,
             commands::query::apply_sqlite_table_structure_change,
             commands::query::build_create_table_sql,
@@ -2069,6 +2078,16 @@ pub fn run() {
             commands::document_cmd::meilisearch_get_index_overview,
             commands::document_cmd::meilisearch_delete_index,
             commands::document_cmd::meilisearch_delete_all_documents,
+            commands::document_cmd::meilisearch_get_system_overview,
+            commands::document_cmd::meilisearch_list_keys,
+            commands::document_cmd::meilisearch_get_key,
+            commands::document_cmd::meilisearch_create_key,
+            commands::document_cmd::meilisearch_update_key,
+            commands::document_cmd::meilisearch_delete_key,
+            commands::document_cmd::meilisearch_get_tasks,
+            commands::document_cmd::meilisearch_get_task,
+            commands::document_cmd::meilisearch_cancel_tasks,
+            commands::document_cmd::meilisearch_delete_tasks,
             commands::hbase_cmd::hbase_get_table_schema,
             commands::hbase_cmd::hbase_scan_rows,
             commands::hbase_cmd::hbase_get_row,
@@ -2302,6 +2321,8 @@ pub fn run() {
             commands::agents::reinstall_jre,
             commands::agents::invalidate_agent_registry_cache,
             commands::agents::import_agents_from_zip,
+            commands::agents::preview_agent_offline_export,
+            commands::agents::export_agents_offline,
             commands::agents::import_agent_driver_cmd,
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,

@@ -10,6 +10,13 @@ const backend = vi.hoisted(() => ({
   vectorGetCollectionDetail: vi.fn(),
 }));
 
+vi.mock("vue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vue")>();
+  return {
+    ...actual,
+    defineAsyncComponent: () => actual.defineComponent({ render: () => null }),
+  };
+});
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/lib/backend/api", () => backend);
 vi.mock("@lucide/vue", async () => {
@@ -85,9 +92,13 @@ beforeEach(() => {
   document.body.appendChild(root);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await vi.dynamicImportSettled();
+  await flushUi();
   app?.unmount();
   app = null;
+  await vi.dynamicImportSettled();
+  await flushUi();
   root?.remove();
   root = null;
   document.body.innerHTML = "";

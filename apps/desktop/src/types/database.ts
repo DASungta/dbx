@@ -1,6 +1,6 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
-import type { MultiDbResultRunExecution } from "@/types/sqlExecution";
+import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 
 export type DatabaseType =
   | "mysql"
@@ -771,7 +771,9 @@ export interface BatchSqlExecution {
   completed: number;
   total: number;
   startedAt: number;
+  executionTarget?: MultiDbExecutionTarget;
   finishedAt?: number;
+  recoveryDismissed?: boolean;
   items: BatchStatementExecutionItem[];
 }
 
@@ -791,6 +793,8 @@ export interface QueryResultRun {
   sequence: number;
   sql: string;
   createdAt: number;
+  /** Keeps this result from being replaced by an ordinary query execution. */
+  pinned?: boolean;
   /** Distinguishes successive result payloads that reuse the same run slot. */
   resultGridRevision?: string;
   result?: QueryResult;
@@ -971,6 +975,7 @@ export type TreeNodeType =
   | "vector-database"
   | "vector-collection"
   | "elasticsearch-index"
+  | "meilisearch-system"
   | "mqtt-topic";
 
 export interface ConnectionGroup {
@@ -1068,6 +1073,8 @@ export interface TableStructureEditorDraft {
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
+  tableOwner?: string;
+  originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
@@ -1189,6 +1196,7 @@ export interface QueryTab {
     | "redis-dashboard"
     | "mongo"
     | "meilisearch"
+    | "meilisearch-system"
     | "mongo-gridfs"
     | "mongo-bucket"
     | "vector"

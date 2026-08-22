@@ -423,6 +423,7 @@ async fn main() {
         .route("/schema/all-columns", get(routes::schema::get_all_columns))
         .route("/schema/data-types", get(routes::schema::list_data_types))
         .route("/schema/indexes", get(routes::schema::list_indexes))
+        .route("/schema/reference-key-columns", get(routes::schema::list_reference_key_columns))
         .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
         .route("/schema/triggers", get(routes::schema::list_triggers))
         .route("/schema/constraints", get(routes::schema::list_constraints))
@@ -434,6 +435,7 @@ async fn main() {
         .route("/schema/sequences", get(routes::schema::list_sequences))
         .route("/schema/rules", get(routes::schema::list_rules))
         .route("/schema/owners", get(routes::schema::list_owners))
+        .route("/schema/table-owner", get(routes::schema::get_table_owner))
         .route("/schema/extensions", get(routes::schema::list_extensions))
         .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
         .route("/schema/ddl", get(routes::schema::get_ddl))
@@ -479,6 +481,8 @@ async fn main() {
         .route("/query/build-database-search-sql", post(routes::query::build_database_search_sql))
         .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
+        .route("/query/build-rename-database-sql", post(routes::query::build_rename_database_sql))
+        .route("/query/build-rename-database-preflight-sql", post(routes::query::build_rename_database_preflight_sql))
         .route("/query/build-create-database-sql", post(routes::query::build_create_database_sql))
         .route("/query/build-sqlite-attach-database-sql", post(routes::query::build_sqlite_attach_database_sql))
         .route("/query/build-drop-object-sql", post(routes::query::build_drop_object_sql))
@@ -506,6 +510,7 @@ async fn main() {
         )
         .route("/query/build-view-ddl-sql", post(routes::query::build_view_ddl_sql))
         .route("/query/build-table-structure-change-sql", post(routes::query::build_table_structure_change_sql))
+        .route("/query/build-table-owner-change-sql", post(routes::query::build_table_owner_change_sql))
         .route(
             "/query/preview-sqlite-table-structure-change",
             post(routes::query::preview_sqlite_table_structure_change),
@@ -824,6 +829,19 @@ async fn main() {
         .route("/document-store/meilisearch/stats", post(routes::document_store::meilisearch_get_stats))
         .route("/document-store/meilisearch/overview", post(routes::document_store::meilisearch_get_overview))
         .route("/document-store/meilisearch/index/delete", post(routes::document_store::meilisearch_delete_index))
+        .route(
+            "/document-store/meilisearch/system/overview",
+            post(routes::document_store::meilisearch_get_system_overview),
+        )
+        .route("/document-store/meilisearch/keys/list", post(routes::document_store::meilisearch_list_keys))
+        .route("/document-store/meilisearch/keys/get", post(routes::document_store::meilisearch_get_key))
+        .route("/document-store/meilisearch/keys/create", post(routes::document_store::meilisearch_create_key))
+        .route("/document-store/meilisearch/keys/update", post(routes::document_store::meilisearch_update_key))
+        .route("/document-store/meilisearch/keys/delete", post(routes::document_store::meilisearch_delete_key))
+        .route("/document-store/meilisearch/tasks/list", post(routes::document_store::meilisearch_get_tasks))
+        .route("/document-store/meilisearch/tasks/get", post(routes::document_store::meilisearch_get_task))
+        .route("/document-store/meilisearch/tasks/cancel", post(routes::document_store::meilisearch_cancel_tasks))
+        .route("/document-store/meilisearch/tasks/delete", post(routes::document_store::meilisearch_delete_tasks))
         .route(
             "/document-store/meilisearch/documents/delete-all",
             post(routes::document_store::meilisearch_delete_all_documents),
