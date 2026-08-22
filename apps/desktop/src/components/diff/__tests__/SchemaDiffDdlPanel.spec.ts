@@ -9,4 +9,8 @@ describe("SchemaDiffDdlPanel diff highlighting", () => {
     expect(panelSource).not.toContain("sticky top-0 bg-muted/50");
     expect(panelSource.match(/sticky top-0 bg-background/g)).toHaveLength(4);
   });
+
+  it("never applies the focused-row outline to empty padding lines", () => {
+    expect(panelSource).toContain('if (line.isPadding || focusedLineNumber === null) return "";');
+  });
 });

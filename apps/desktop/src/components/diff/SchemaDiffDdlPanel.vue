@@ -219,6 +219,7 @@ function locateFocusedObject() {
 
 function focusedLineClass(line: DiffLine, side: "source" | "target"): string {
   const focusedLineNumber = side === "source" ? focusedSourceLineNumber.value : focusedTargetLineNumber.value;
+  if (line.isPadding || focusedLineNumber === null) return "";
   return line.lineNumber === focusedLineNumber ? "outline outline-1 -outline-offset-1 outline-primary/70" : "";
 }
 
