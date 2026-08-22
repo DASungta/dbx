@@ -252,12 +252,17 @@ const { configs, activeConfigId, activeConfig, recentConfigs, ensureDefaultConfi
 const schemaDiffPanelOptions = computed(() => normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType()));
 
 const selectedObject = computed(() => {
+  const object = selectedTreeObject.value;
+  if (!object) return null;
+  return object.parentId ? (findSchemaDiffObject(diffObjects.value, object.parentId) ?? object) : object;
+});
+
+const selectedTreeObject = computed(() => {
   if (!selectedObjectId.value) return null;
   for (const group of diffGroups.value) {
     for (const typeGroup of group.typeGroups) {
       const object = flattenSchemaDiffObjects(typeGroup.objects).find((candidate) => candidate.id === selectedObjectId.value);
-      if (!object) continue;
-      return object.parentId ? (findSchemaDiffObject(diffObjects.value, object.parentId) ?? object) : object;
+      if (object) return object;
     }
   }
   return null;
@@ -1005,6 +1010,7 @@ const targetConnectionInfo = computed(() => {
             <Pane :size="100 - splitpanesSize" min-size="20">
               <SchemaDiffDdlPanel
                 :selected-object="selectedObject"
+                :focused-object="selectedTreeObject"
                 :deploy-sql="deploySql"
                 :deploy-sql-all="deploySqlAll"
                 :compatibility-warnings="selectedCompatibilityWarnings"

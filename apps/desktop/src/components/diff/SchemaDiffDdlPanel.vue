@@ -9,6 +9,7 @@ import { DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { useDiffScrollSync } from "@/composables/useDiffScrollSync";
 import { buildHunks, type DiffLine } from "@/components/diff/DiffHunkBuilder";
 import { buildSchemaDiffHighlightSegments, type SchemaDiffHighlightSegment } from "@/lib/schema/schemaDiffHighlight";
+import { findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
 import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
 import { FileCode, ScrollText, Copy, Play, FileDiff } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
@@ -35,6 +36,7 @@ function toRgba(hex: string, alpha: number): string {
 
 const props = defineProps<{
   selectedObject: SchemaDiffObject | null;
+  focusedObject?: SchemaDiffObject | null;
   deploySql: string;
   deploySqlAll: string;
   compatibilityWarnings?: CompatibilityWarning[];
@@ -58,6 +60,8 @@ const leftPaneRef = ref<HTMLDivElement>();
 const rightPaneRef = ref<HTMLDivElement>();
 const containerSize = ref({ width: 0, height: 0 });
 const connectorKey = ref(0);
+const focusedSourceLineNumber = ref<number | null>(null);
+const focusedTargetLineNumber = ref<number | null>(null);
 
 const rollbackDiffContainerRef = ref<HTMLDivElement>();
 const rollbackLeftPaneRef = ref<HTMLDivElement>();
@@ -178,14 +182,45 @@ function rollbackUpdateContainerSize() {
   rollbackContainerSize.value = { width: rect.width, height: rect.height };
 }
 
-watch(
-  () => props.selectedObject?.id,
-  async () => {
-    await nextTick();
-    updateContainerSize();
-    requestMeasure();
-  },
-);
+watch([() => props.selectedObject?.id, () => props.focusedObject?.id, hunks], async () => {
+  if (props.focusedObject?.parentId) activeTab.value = "ddl";
+  await nextTick();
+  updateContainerSize();
+  requestMeasure();
+  locateFocusedObject();
+});
+
+function scrollPaneToLine(pane: HTMLDivElement | undefined, lineNumber: number | null) {
+  if (!pane || lineNumber === null) return;
+  const row = pane.querySelector<HTMLElement>(`[data-ddl-line-number="${lineNumber}"]`);
+  if (!row) return;
+  const paneRect = pane.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  pane.scrollTo({
+    top: Math.max(0, pane.scrollTop + rowRect.top - paneRect.top - pane.clientHeight / 2 + rowRect.height / 2),
+    behavior: "smooth",
+  });
+}
+
+function locateFocusedObject() {
+  const selectedObject = props.selectedObject;
+  const focusedObject = props.focusedObject;
+  if (!selectedObject || !focusedObject || focusedObject.id === selectedObject.id) {
+    focusedSourceLineNumber.value = null;
+    focusedTargetLineNumber.value = null;
+    return;
+  }
+
+  focusedSourceLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.sourceDdl ?? "", focusedObject, "source");
+  focusedTargetLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.targetDdl ?? "", focusedObject, "target");
+  scrollPaneToLine(leftPaneRef.value, focusedSourceLineNumber.value);
+  scrollPaneToLine(rightPaneRef.value, focusedTargetLineNumber.value);
+}
+
+function focusedLineClass(line: DiffLine, side: "source" | "target"): string {
+  const focusedLineNumber = side === "source" ? focusedSourceLineNumber.value : focusedTargetLineNumber.value;
+  return line.lineNumber === focusedLineNumber ? "outline outline-1 -outline-offset-1 outline-primary/70" : "";
+}
 
 function updateContainerSize() {
   const el = diffContainerRef.value;
@@ -316,7 +351,7 @@ function copyDeploySqlAll() {
                 {{ t("diff.sourceDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
+                <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'source')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -340,7 +375,7 @@ function copyDeploySqlAll() {
                 {{ t("diff.targetDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
+                <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'target')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
