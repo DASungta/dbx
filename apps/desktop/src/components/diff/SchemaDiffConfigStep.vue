@@ -105,6 +105,15 @@ function handleUpdateSelectedTables(value: string[]) {
   if (restrictTables.value) emit("update:selectedTables", [...value]);
 }
 
+function clearUnavailableTableSelection() {
+  sourceTableList.value = [];
+  targetTableList.value = [];
+  if (props.selectedTables === undefined && !restrictTables.value && localSelectedTables.value.length === 0) return;
+  restrictTables.value = false;
+  localSelectedTables.value = [];
+  emit("update:selectedTables", undefined);
+}
+
 function getTableIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity {
   return side === "source" ? { connectionId: props.sourceConnectionId, database: props.sourceDatabase, schema: props.sourceSchema } : { connectionId: props.targetConnectionId, database: props.targetDatabase, schema: props.targetSchema };
 }
@@ -277,13 +286,17 @@ watch(
     selectedTables: props.selectedTables,
   }),
   (current, previous) => {
+    if (!isTableIdentityReady("source")) {
+      clearUnavailableTableSelection();
+      return;
+    }
+    if (!previous) return;
     if (current.source.every((value, index) => value === previous.source[index])) return;
     if (current.selectedTables !== previous.selectedTables) return;
     if (current.selectedTables === undefined && !restrictTables.value) return;
-    restrictTables.value = false;
-    localSelectedTables.value = [];
-    emit("update:selectedTables", undefined);
+    clearUnavailableTableSelection();
   },
+  { immediate: true },
 );
 
 watch(
@@ -446,7 +459,15 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
           <div v-if="!restrictTables" class="text-[11px] text-muted-foreground">
             {{ t("diff.tableSelectionUnrestricted") }}
           </div>
-          <TableMultiSelect v-if="restrictTables" :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`" :model-value="localSelectedTables" @update:model-value="handleUpdateSelectedTables" :tables="sourceTableList" :title="t('diff.sourceTables')" :empty-text="t('dataCompare.noTables')" />
+          <TableMultiSelect
+            v-if="restrictTables && canConfigureTableSelection"
+            :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+            :model-value="localSelectedTables"
+            @update:model-value="handleUpdateSelectedTables"
+            :tables="sourceTableList"
+            :title="t('diff.sourceTables')"
+            :empty-text="t('dataCompare.noTables')"
+          />
         </div>
 
         <!-- Source Info -->
@@ -535,7 +556,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
         </div>
 
         <!-- Target Same-Name Match -->
-        <div v-if="restrictTables && localSelectedTables.length" class="mt-3 space-y-1.5 rounded-lg border p-3 text-xs">
+        <div v-if="restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="mt-3 space-y-1.5 rounded-lg border p-3 text-xs">
           <div class="font-medium">{{ t("diff.autoMatchHint") }}</div>
           <div class="text-muted-foreground">
             {{ t("diff.matchedTables", { matched: matchResult.matched.length, total: localSelectedTables.length }) }}

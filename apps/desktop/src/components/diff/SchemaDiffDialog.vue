@@ -124,6 +124,7 @@ const renameCandidates = ref<RenameCandidate[]>([]);
 const compatibilityWarnings = ref<CompatibilityWarning[]>([]);
 const permissionDiffs = ref<PermissionDiff[]>([]);
 const dependencyGraph = ref<DependencyGraph | null>(null);
+let deploySqlGeneration = 0;
 
 // Rename candidates panel
 const showRenamePanel = ref(true);
@@ -272,11 +273,34 @@ const canDeploy = computed(() => {
   return selectedSchemaDiffObjects(diffObjects.value).length > 0;
 });
 
+function resetComparisonResultState() {
+  deploySqlGeneration++;
+  step.value = "config";
+  diffObjects.value = [];
+  diffGroups.value = [];
+  selectedObjectId.value = null;
+  deploySql.value = "";
+  deploySqlAll.value = "";
+  lastDiffResult.value = null;
+  rollbackSql.value = "";
+  rollbackCompleteness.value = "complete";
+  missingRollbackObjects.value = [];
+  renameCandidates.value = [];
+  compatibilityWarnings.value = [];
+  permissionDiffs.value = [];
+  dependencyGraph.value = null;
+  deploySqlMode.value = "forward";
+  showConfirmDialog.value = false;
+  showResultDialog.value = false;
+  deployResult.value = null;
+}
+
 // Watch for prefilled values
 watch(
   () => open.value,
   (isOpen) => {
     if (isOpen) {
+      resetComparisonResultState();
       ensureDefaultConfig();
       if (props.prefillConnectionId) {
         sourceConnectionId.value = props.prefillConnectionId;
@@ -588,8 +612,6 @@ function rebuildDiffGroups() {
     })),
   }));
 }
-
-let deploySqlGeneration = 0;
 
 async function regenerateDeploySql() {
   const result = lastDiffResult.value;

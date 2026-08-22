@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const dialogSource = readFileSync(new URL("../SchemaDiffDialog.vue", import.meta.url), "utf8");
+const configStepSource = readFileSync(new URL("../SchemaDiffConfigStep.vue", import.meta.url), "utf8");
 
 describe("SchemaDiffDialog fullscreen layout", () => {
   it("fits the dialog to its portal instead of the viewport width", () => {
@@ -38,5 +39,19 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     // the scrollbar); only then does the taller-than-dialog content actually overflow and
     // become reachable via scrolling.
     expect(dialogSource).toMatch(/<SchemaDiffConfigStep\n[\s\S]*?class="shrink-0"/);
+  });
+
+  it("clears stale result state whenever a new dialog session opens", () => {
+    expect(dialogSource).toContain("function resetComparisonResultState() {");
+    expect(dialogSource).toMatch(/if \(isOpen\) \{\s+resetComparisonResultState\(\);/);
+    expect(dialogSource).toContain("diffObjects.value = [];");
+    expect(dialogSource).toContain("lastDiffResult.value = null;");
+  });
+
+  it("does not restore persisted table matches before source and target identities are ready", () => {
+    expect(configStepSource).toContain('if (!isTableIdentityReady("source")) {');
+    expect(configStepSource).toContain("clearUnavailableTableSelection();");
+    expect(configStepSource).toContain('v-if="restrictTables && canConfigureTableSelection"');
+    expect(configStepSource).toContain("restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')");
   });
 });
