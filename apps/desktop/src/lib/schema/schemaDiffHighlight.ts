@@ -13,15 +13,32 @@ export interface SchemaDiffHighlightSegments {
 export function buildSchemaDiffHighlightSegments(source: string, target: string): SchemaDiffHighlightSegments {
   const sourceSegments: SchemaDiffHighlightSegment[] = [];
   const targetSegments: SchemaDiffHighlightSegment[] = [];
+  const changes = diffChars(source, target);
+  const firstChangedIndex = changes.findIndex((change) => change.added || change.removed);
+  let lastChangedIndex = -1;
+  for (let index = changes.length - 1; index >= 0; index--) {
+    if (changes[index].added || changes[index].removed) {
+      lastChangedIndex = index;
+      break;
+    }
+  }
 
-  for (const change of diffChars(source, target)) {
+  const append = (segments: SchemaDiffHighlightSegment[], text: string, changed: boolean) => {
+    if (!text) return;
+    const previous = segments[segments.length - 1];
+    if (previous?.changed === changed) previous.text += text;
+    else segments.push({ text, changed });
+  };
+
+  for (const [index, change] of changes.entries()) {
     if (change.removed) {
-      sourceSegments.push({ text: change.value, changed: true });
+      append(sourceSegments, change.value, true);
     } else if (change.added) {
-      targetSegments.push({ text: change.value, changed: true });
+      append(targetSegments, change.value, true);
     } else {
-      sourceSegments.push({ text: change.value, changed: false });
-      targetSegments.push({ text: change.value, changed: false });
+      const betweenChanges = firstChangedIndex >= 0 && index > firstChangedIndex && index < lastChangedIndex;
+      append(sourceSegments, change.value, betweenChanges);
+      append(targetSegments, change.value, betweenChanges);
     }
   }
 
