@@ -2481,6 +2481,13 @@ function isCustomCompatibleProfile() {
   return selectedType.value === "custom_mysql" || selectedType.value === "custom_postgres";
 }
 
+function connectionUrlPreferredProfile() {
+  if (selectedType.value === "oceanbase" && form.value.driver_profile === "oceanbase-oracle") {
+    return "oceanbase-oracle";
+  }
+  return selectedType.value;
+}
+
 function applyProfile(val: string, preserveConnectionFields = false) {
   const profile = driverProfiles[val];
   if (!profile) return;
@@ -3870,7 +3877,7 @@ function applyConnectionUrlToForm(input: string): boolean {
       return true;
     }
 
-    const parsed = parseConnectionUrl(input, selectedType.value);
+    const parsed = parseConnectionUrl(input, connectionUrlPreferredProfile());
     form.value = applyParsedConnectionUrl(form.value, parsed);
     if (form.value.db_type === "victoriametrics") {
       hydrateVictoriaMetricsFields(form.value.external_config);
@@ -3881,7 +3888,12 @@ function applyConnectionUrlToForm(input: string): boolean {
       resetMeilisearchHostInput();
     }
     oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
-    selectedType.value = parsed.driverProfile;
+    if (parsed.driverProfile === "oceanbase-oracle") {
+      oceanbaseSubMode.value = "oracle";
+      selectedType.value = "oceanbase";
+    } else {
+      selectedType.value = parsed.driverProfile;
+    }
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
     if (form.value.db_type === "h2") {
@@ -3936,7 +3948,7 @@ function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
       return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
     }
 
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, connectionUrlPreferredProfile()));
   }
 
   if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {

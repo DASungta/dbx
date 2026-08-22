@@ -357,6 +357,15 @@ jobs:
           cache-targets: false
           cache-on-failure: true
 
+      - name: Ensure vendored OpenSSL Perl modules on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! perl -MParams::Check -e 1 >/dev/null 2>&1; then
+            cpan -T Params::Check
+          fi
+          perl -MParams::Check -e 1
+
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
@@ -546,6 +555,15 @@ jobs:
           shared-key: dbx-mcp-${{ matrix.target }}
           cache-targets: false
           cache-on-failure: true
+
+      - name: Ensure vendored OpenSSL Perl modules on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! perl -MParams::Check -e 1 >/dev/null 2>&1; then
+            cpan -T Params::Check
+          fi
+          perl -MParams::Check -e 1
 
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'

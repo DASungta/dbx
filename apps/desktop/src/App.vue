@@ -2041,6 +2041,12 @@ function setSidebarOpen(open: boolean) {
   safeLocalStorageSet("dbx-sidebar-open", open ? "true" : "false");
 }
 
+async function locateTabInSidebar(tab: QueryTab) {
+  setSidebarOpen(true);
+  await nextTick();
+  await appSidebarRef.value?.locateTabInSidebar(tab);
+}
+
 function ensureQueryTab(): string {
   const tab = activeTab.value;
   if (tab && tab.mode === "query") return tab.id;
@@ -2847,6 +2853,7 @@ onUnmounted(() => {
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
+                @locate-tab="locateTabInSidebar"
                 @activate-tab="
                   driverStoreActive = false;
                   settingsStore.settingsPageActive = false;

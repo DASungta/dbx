@@ -1825,7 +1825,7 @@ async function exportDebugLogs() {
 }
 
 // ---------- MCP Server ----------
-type McpConfigTab = "claude" | "cursor" | "codebuddy" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio";
+type McpConfigTab = "claude" | "cursor" | "codebuddy" | "zcode" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio";
 type McpCopyKind = "install" | "uninstall" | `${McpConfigTab}-config`;
 
 const mcpStatus = ref<McpServerStatus | null>(null);
@@ -6673,6 +6673,7 @@ onUnmounted(() => {
                     <TabsTrigger value="claude" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
                     <TabsTrigger value="cursor" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
                     <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code</TabsTrigger>
+                    <TabsTrigger value="zcode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">ZCode</TabsTrigger>
                     <TabsTrigger value="trae" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
                     <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
                     <TabsTrigger value="windsurf" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Windsurf</TabsTrigger>
@@ -6717,6 +6718,21 @@ onUnmounted(() => {
                         <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpJsonRecommendedConfig }}</code></pre>
                         <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('codebuddy-config', mcpJsonRecommendedConfig)">
                           <CheckCircle2 v-if="mcpCopied === 'codebuddy-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="zcode" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpZCodeConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpJsonRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('zcode-config', mcpJsonRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'zcode-config'" class="h-3.5 w-3.5 text-green-500" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </Button>
                       </div>
