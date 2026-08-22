@@ -166,7 +166,7 @@ function targetObjectName(object: SchemaDiffObject): string {
       <div v-if="group.expanded" class="divide-y divide-border/30">
         <div v-for="object in groupObjects(group)" :key="object.id">
           <div class="grid grid-cols-[1fr_60px_1fr] gap-2 px-3 py-1.5 items-center hover:bg-accent/30 cursor-pointer" :class="{ 'bg-primary/10': selectedObjectId === object.id }" @click="$emit('selectObject', object)">
-            <div v-if="object.operationType !== 'delete'" class="flex items-center gap-2 min-w-0">
+            <div v-if="object.operationType !== 'delete'" class="flex items-center gap-2 min-w-0 pl-6">
               <button v-if="object.children?.length" type="button" class="shrink-0" @click.stop="toggleObjectExpanded(object.id)">
                 <ChevronDown v-if="isObjectExpanded(object.id)" class="w-3.5 h-3.5" />
                 <ChevronRight v-else class="w-3.5 h-3.5" />
@@ -183,7 +183,7 @@ function targetObjectName(object: SchemaDiffObject): string {
               <component :is="operationIcons[object.operationType]" class="w-3.5 h-3.5" :class="operationColors[object.operationType]" />
             </div>
 
-            <div v-if="object.operationType !== 'create'" class="flex items-center gap-2 min-w-0">
+            <div v-if="object.operationType !== 'create'" class="flex items-center gap-2 min-w-0 pl-6">
               <button v-if="object.operationType === 'delete' && object.children?.length" type="button" class="shrink-0" @click.stop="toggleObjectExpanded(object.id)">
                 <ChevronDown v-if="isObjectExpanded(object.id)" class="w-3.5 h-3.5" />
                 <ChevronRight v-else class="w-3.5 h-3.5" />
@@ -207,7 +207,7 @@ function targetObjectName(object: SchemaDiffObject): string {
 
           <div v-if="object.children?.length && isObjectExpanded(object.id)" class="border-t border-border/20 bg-muted/10">
             <div v-for="child in object.children" :key="child.id" class="grid grid-cols-[1fr_60px_1fr] gap-2 px-3 py-1 items-center hover:bg-accent/30 cursor-pointer" :class="{ 'bg-primary/10': selectedObjectId === child.id }" @click="$emit('selectObject', child)">
-              <div v-if="child.operationType !== 'delete'" class="flex items-center gap-2 min-w-0 pl-7">
+              <div v-if="child.operationType !== 'delete'" class="flex items-center gap-2 min-w-0 pl-16">
                 <input type="checkbox" class="accent-primary shrink-0" :checked="child.selected" @click.stop @change="onObjectCheckboxChange(child, $event)" />
                 <component :is="getObjectIcon(child.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(child.objectKind)" />
                 <span class="text-xs truncate">{{ sourceObjectName(child) }}</span>
@@ -216,7 +216,7 @@ function targetObjectName(object: SchemaDiffObject): string {
               <div class="flex justify-center">
                 <component :is="operationIcons[child.operationType]" class="w-3.5 h-3.5" :class="operationColors[child.operationType]" />
               </div>
-              <div v-if="child.operationType !== 'create'" class="flex items-center gap-2 min-w-0 pl-7">
+              <div v-if="child.operationType !== 'create'" class="flex items-center gap-2 min-w-0 pl-16">
                 <input v-if="child.operationType === 'delete'" type="checkbox" class="accent-primary shrink-0" :checked="child.selected" @click.stop @change="onObjectCheckboxChange(child, $event)" />
                 <component :is="getObjectIcon(child.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(child.objectKind)" />
                 <span class="text-xs truncate" :class="child.operationType === 'delete' ? 'text-red-500 line-through' : ''">{{ targetObjectName(child) }}</span>

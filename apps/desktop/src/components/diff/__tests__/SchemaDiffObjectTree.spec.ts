@@ -63,9 +63,16 @@ describe("SchemaDiffObjectTree", () => {
     for (const button of tableExpandButtons) button.click();
     await nextTick();
 
+    const tableSides = Array.from(host.querySelectorAll("span"))
+      .filter((element) => element.textContent === "users")
+      .map((element) => element.parentElement)
+      .filter((element): element is HTMLElement => element !== null);
+    expect(tableSides.length).toBeGreaterThan(0);
+    expect(tableSides.every((element) => element.classList.contains("pl-6"))).toBe(true);
+
     const emailSides = Array.from(host.querySelectorAll("span")).filter((element) => element.textContent === "email");
     expect(emailSides).toHaveLength(2);
-    expect(emailSides.every((element) => element.parentElement?.classList.contains("pl-7"))).toBe(true);
+    expect(emailSides.every((element) => element.parentElement?.classList.contains("pl-16"))).toBe(true);
 
     const nickname = Array.from(host.querySelectorAll("span")).find((element) => element.textContent === "nickname");
     expect(nickname).toBeTruthy();
