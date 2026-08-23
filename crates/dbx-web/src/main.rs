@@ -418,6 +418,7 @@ async fn main() {
         .route("/schema/completion-objects", get(routes::schema::list_completion_objects))
         .route("/schema/completion-assistant", post(routes::schema::completion_assistant_search))
         .route("/schema/object-source", get(routes::schema::get_object_source))
+        .route("/schema/event-info", get(routes::schema::get_event_info))
         .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
         .route("/schema/columns", get(routes::schema::list_columns))
         .route("/schema/all-columns", get(routes::schema::get_all_columns))
@@ -447,6 +448,7 @@ async fn main() {
         .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
+        .route("/schema-diff/generate-sync-plan", post(routes::schema_diff::generate_schema_sync_plan))
         .route(
             "/schema/cache",
             post(routes::schema_cache::save_schema_cache).get(routes::schema_cache::load_schema_cache),

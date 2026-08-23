@@ -84,6 +84,8 @@ import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTarge
 import type { DriverProfileWorkspaceScope } from "@/lib/database/driverProfileExtensions";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 
+const QUERY_SURFACE_ACTIVATION_EVENT = "dbx:activate-query-surface";
+
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const ORACLE_DEFERRED_LOB_TYPES = new Set<string>(["CLOB", "NCLOB", "BLOB", "BFILE", "XMLTYPE", "SYS.XMLTYPE"]);
 
@@ -1877,10 +1879,19 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string) {
+  function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string, eventName?: string, eventReadOnly = false, initialObjectFilter?: "tables" | "events") {
     const title = catalog ? `${catalog}.${database} objects` : schema ? `${schema} objects` : `${database} objects`;
     const existing = tabs.value.find((tab) => tab.mode === "objects" && tab.connectionId === connectionId && tab.database === database && (tab.objectBrowser?.catalog || "") === (catalog || "") && (tab.objectBrowser?.schema || "") === (schema || ""));
     if (existing) {
+      if (eventName) {
+        existing.objectBrowser = {
+          ...existing.objectBrowser,
+          eventName,
+          eventReadOnly,
+          initialObjectFilter: initialObjectFilter ?? (eventName ? "events" : existing.objectBrowser?.initialObjectFilter),
+          eventOpenRequestId: (existing.objectBrowser?.eventOpenRequestId ?? 0) + 1,
+        };
+      }
       switchTab(existing.id);
       return existing.id;
     }
@@ -1901,6 +1912,10 @@ export const useQueryStore = defineStore("query", () => {
         catalog,
         schema,
         objectType: "tables",
+        eventName,
+        eventReadOnly,
+        initialObjectFilter: initialObjectFilter ?? (eventName ? "events" : undefined),
+        eventOpenRequestId: eventName ? 1 : undefined,
       },
     };
     tabs.value.push(tab);
@@ -1960,6 +1975,7 @@ export const useQueryStore = defineStore("query", () => {
   function switchTab(tabId: string) {
     activeTabId.value = tabId;
     settingsStore.settingsPageActive = false;
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(QUERY_SURFACE_ACTIVATION_EVENT));
   }
 
   function openUserAdmin(connectionId: string) {

@@ -9,6 +9,7 @@ import {
   ArrowUp,
   Braces,
   CheckSquare,
+  Clock,
   Clipboard,
   Code2,
   Copy,
@@ -95,6 +96,7 @@ import { useExportTracker, type ExportTask } from "@/composables/useExportTracke
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
+import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -134,6 +136,9 @@ import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCach
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
+import { invalidateObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -143,6 +148,10 @@ const props = defineProps<{
   database: string;
   catalog?: string;
   schema?: string;
+  initialEventName?: string;
+  initialEventReadOnly?: boolean;
+  initialEventOpenRequestId?: number;
+  initialObjectFilter?: "tables" | "events";
   viewport?: ObjectBrowserViewport;
 }>();
 
@@ -183,7 +192,9 @@ const sourceCanEdit = ref(true);
 // --- Right-side panel state ---
 // Unified panel: either "table-info" (for tables) or "source" (for views/procedures/etc.)
 const sidePanelRow = ref<ObjectBrowserRow | null>(null);
-const sidePanelMode = ref<"table-info" | "source" | "type-info">("source");
+const openedInitialEvent = ref("");
+const isEventEditor = computed(() => sidePanelMode.value === "event-editor");
+const sidePanelMode = ref<"table-info" | "source" | "type-info" | "event-editor">("source");
 // Table info panel state
 const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableColumns = ref<ColumnInfo[]>([]);
@@ -322,6 +333,7 @@ const objectFilters = computed<ObjectFilter[]>(() =>
       ["procedures", objectCounts.value.procedures],
       ["functions", objectCounts.value.functions],
       ["triggers", objectCounts.value.triggers],
+      ["events", objectCounts.value.events],
       ["sequences", objectCounts.value.sequences],
       ["packages", objectCounts.value.packages],
       ["types", objectCounts.value.types],
@@ -459,6 +471,7 @@ watch(objectFilter, () => {
   }
   scrollObjectsToTop();
 });
+watch([() => props.initialEventName, () => props.initialEventOpenRequestId, rows, loadingObjects], openInitialEventIfNeeded, { flush: "post" });
 watch(
   () => props.connection.show_system_schemas,
   (value, oldValue) => {
@@ -606,6 +619,7 @@ function iconFor(row: ObjectBrowserRow) {
   if (row.type === "PROCEDURE") return ScrollText;
   if (row.type === "FUNCTION") return Braces;
   if (row.type === "TRIGGER") return RotateCcw;
+  if (row.type === "EVENT") return Clock;
   if (row.type === "SEQUENCE") return ListTree;
   if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") return Package;
   if (row.type === "TYPE" || row.type === "TYPE_BODY") return Braces;
@@ -618,6 +632,7 @@ function typeLabel(type: ObjectBrowserRow["type"]) {
   if (type === "PROCEDURE") return t("objects.procedure");
   if (type === "FUNCTION") return t("objects.function");
   if (type === "TRIGGER") return t("objects.trigger");
+  if (type === "EVENT") return t("tree.events");
   if (type === "SEQUENCE") return t("objects.sequence");
   if (type === "PACKAGE") return t("objects.package");
   if (type === "PACKAGE_BODY") return t("objects.packageBody");
@@ -721,6 +736,7 @@ function rowMatchesFilter(row: ObjectBrowserRow, filter: ObjectFilter) {
   if (filter === "procedures") return row.type === "PROCEDURE";
   if (filter === "functions") return row.type === "FUNCTION";
   if (filter === "triggers") return row.type === "TRIGGER";
+  if (filter === "events") return row.type === "EVENT";
   if (filter === "sequences") return row.type === "SEQUENCE";
   if (filter === "packages") return row.type === "PACKAGE" || row.type === "PACKAGE_BODY";
   if (filter === "types") return row.type === "TYPE" || row.type === "TYPE_BODY";
@@ -814,6 +830,7 @@ function iconClass(type: ObjectBrowserRow["type"]) {
   if (type === "PROCEDURE") return "text-blue-500";
   if (type === "FUNCTION") return "text-amber-500";
   if (type === "TRIGGER") return "text-rose-500";
+  if (type === "EVENT") return "text-orange-500";
   if (type === "SEQUENCE") return "text-emerald-500";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "text-cyan-500";
   if (type === "TYPE" || type === "TYPE_BODY") return "text-violet-500";
@@ -825,6 +842,7 @@ function iconBgClass(type: ObjectBrowserRow["type"]) {
   if (type === "PROCEDURE") return "object-browser-icon-bg object-browser-icon-bg-procedure";
   if (type === "FUNCTION") return "object-browser-icon-bg object-browser-icon-bg-function";
   if (type === "TRIGGER") return "object-browser-icon-bg object-browser-icon-bg-procedure";
+  if (type === "EVENT") return "object-browser-icon-bg object-browser-icon-bg-procedure";
   if (type === "SEQUENCE") return "object-browser-icon-bg object-browser-icon-bg-sequence";
   if (type === "PACKAGE" || type === "PACKAGE_BODY") return "object-browser-icon-bg object-browser-icon-bg-package";
   if (type === "TYPE" || type === "TYPE_BODY") return "object-browser-icon-bg object-browser-icon-bg-function";
@@ -867,7 +885,7 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
       emit("openTable", { tableName: row.name, schema: row.schema, catalog: props.catalog });
       break;
     case "open-source":
-      void openSource(row);
+      void (row.type === "EVENT" ? openEventEditor(row) : openSource(row));
       break;
   }
 }
@@ -1301,6 +1319,29 @@ async function openSource(row: ObjectBrowserRow) {
   }
 }
 
+function openEventEditor(row: ObjectBrowserRow) {
+  sidePanelGuard.start();
+  sidePanelRow.value = row;
+  sourceRow.value = null;
+  sidePanelMode.value = "event-editor";
+}
+
+async function onEventSaved(savedName: string) {
+  const row = sidePanelRow.value;
+  const name = savedName.trim() || row?.name || "";
+  if (name) {
+    const cacheSchema = row?.schema || selectedSchema.value || props.database;
+    const cacheScope = { connectionId: props.connection.id, database: props.database, schema: cacheSchema, tableName: name };
+    await Promise.all([invalidateObjectMetadataCache(cacheScope), invalidateObjectDdl(cacheScope)]);
+    invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database, schema: cacheSchema });
+    if (row && row.name !== name) {
+      sidePanelRow.value = { ...row, id: `event:${cacheSchema}:${name}`, name, displayName: name };
+    }
+  }
+  await loadObjects({ allowCached: false });
+  toast(t("objects.sourceSaved"));
+}
+
 async function openNewQuery(row: ObjectBrowserRow) {
   const schema = row.schema || selectedSchema.value;
   const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
@@ -1466,8 +1507,11 @@ async function confirmDrop() {
     const sql = dropPreviewSql.value || (await buildDropSqlForRow(row, { cascade: canDropTargetCascade.value && dropTableCascade.value }));
     const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
     if (!executed) return;
-    const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
+    const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : row.type === "EVENT" ? "contextMenu.dropEventSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
+    const cacheSchema = row.schema || selectedSchema.value || props.database;
+    await Promise.all([invalidateObjectMetadataCache({ connectionId: props.connection.id, database: props.database, schema: cacheSchema, tableName: row.name }), invalidateObjectDdl({ connectionId: props.connection.id, database: props.database, schema: cacheSchema, tableName: row.name })]);
+    invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database, schema: cacheSchema });
     closeDroppedTableObjectTabsForRow(row);
     removePinnedObjectBrowserRows([row]);
     await reload();
@@ -1513,6 +1557,7 @@ function dropConfirmTitle(): string {
   if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("contextMenu.confirmDropViewTitle");
   if (type === "PROCEDURE") return t("contextMenu.confirmDropProcedureTitle");
   if (type === "FUNCTION") return t("contextMenu.confirmDropFunctionTitle");
+  if (type === "EVENT") return t("contextMenu.confirmDropEventTitle");
   return t("contextMenu.confirmDropTableTitle");
 }
 
@@ -1523,6 +1568,7 @@ function dropConfirmMessage(): string {
   if (type === "VIEW" || type === "MATERIALIZED_VIEW") return t("contextMenu.confirmDropViewMessage", { name });
   if (type === "PROCEDURE") return t("contextMenu.confirmDropProcedureMessage", { name });
   if (type === "FUNCTION") return t("contextMenu.confirmDropFunctionMessage", { name });
+  if (type === "EVENT") return t("contextMenu.confirmDropEventMessage", { name });
   return t("contextMenu.confirmDropTableMessage", { name });
 }
 
@@ -2584,16 +2630,33 @@ function applyObjectBrowserRows(nextRows: ObjectBrowserRow[]) {
   expandedPartitionParentIds.value = new Set([...expandedPartitionParentIds.value].filter((id) => rows.value.some((row) => row.id === id && row.partitionCount)));
 }
 
+function openInitialEventIfNeeded() {
+  const name = props.initialEventName?.trim();
+  const requestKey = `${props.initialEventOpenRequestId ?? 0}:${name}`;
+  if (!name || openedInitialEvent.value === requestKey || loadingObjects.value) return;
+  const row = rows.value.find((candidate) => candidate.type === "EVENT" && candidate.name === name);
+  if (!row) return;
+  openedInitialEvent.value = requestKey;
+  openEventEditor(row);
+}
+
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
-  if (!userHasSelectedFilter.value && objectCounts.value.tables > 0) {
+  const preferredFilter = props.initialObjectFilter ?? (props.initialEventName ? "events" : "tables");
+  if (!userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
     preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
-    objectFilter.value = "tables";
+    objectFilter.value = preferredFilter;
   }
+  openInitialEventIfNeeded();
   restoreObjectBrowserViewport();
 }
+
+watch([() => props.initialEventName, () => props.initialEventOpenRequestId], ([name, requestId], [previousName, previousRequestId]) => {
+  if (name !== previousName || requestId !== previousRequestId) openedInitialEvent.value = "";
+  openInitialEventIfNeeded();
+});
 
 async function loadObjects(options?: { allowCached?: boolean }) {
   error.value = "";
@@ -2704,13 +2767,15 @@ function filterLabel(filter: ObjectFilter) {
               ? "objects.functions"
               : filter === "triggers"
                 ? "tree.triggers"
-                : filter === "sequences"
-                  ? "objects.sequences"
-                  : filter === "packages"
-                    ? "objects.packages"
-                    : filter === "types"
-                      ? "tree.types"
-                      : "objects.all";
+                : filter === "events"
+                  ? "tree.events"
+                  : filter === "sequences"
+                    ? "objects.sequences"
+                    : filter === "packages"
+                      ? "objects.packages"
+                      : filter === "types"
+                        ? "tree.types"
+                        : "objects.all";
   return `${t(key)} ${filterCount(filter)}`;
 }
 
@@ -2930,6 +2995,17 @@ function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   ];
 }
 
+function getEventMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  return [
+    { label: t("contextMenu.editObject"), action: () => openEventEditor(item), icon: PencilLine },
+    { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
+    { label: "", separator: true },
+    { label: t("contextMenu.dropObject"), action: () => requestDrop(item), icon: Trash2, variant: "destructive" as const },
+    { label: "", separator: true },
+    { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+  ];
+}
+
 function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
@@ -2964,6 +3040,7 @@ function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TABLE") return getTableMenuItems(item);
   if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
+  if (item.type === "EVENT") return getEventMenuItems(item);
   if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
   if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
@@ -2972,7 +3049,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 <template>
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
-    <div class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
+    <div v-if="!isEventEditor" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
       <div class="flex min-w-0 items-center gap-2">
         <span class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium truncate" :title="selectedSchema || props.database">
           {{ selectedSchema || props.database }}
@@ -3097,7 +3174,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     <div v-else-if="filteredRows.length === 0" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
       {{ t("objects.empty") }}
     </div>
-    <div v-else class="flex min-h-0 min-w-0 flex-1">
+    <div v-else class="flex min-h-0 min-w-0 flex-1" :class="{ 'event-editor-layout': isEventEditor }">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
           <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
@@ -3463,6 +3540,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <template v-else-if="sidePanelMode === 'type-info'">
           <CustomTypeInfoPanel ref="sidePanelRef" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name || ''" :catalog="props.catalog" @close="closeSidePanel" />
         </template>
+        <template v-else-if="sidePanelMode === 'event-editor'">
+          <MySqlEventEditor :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name" :read-only="props.initialEventReadOnly" @saved="onEventSaved" @close="closeSidePanel" />
+        </template>
         <!-- Source mode (views, procedures, functions, sequences) -->
         <template v-else>
           <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
@@ -3818,6 +3898,15 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 .object-browser-side-panel {
   container-type: inline-size;
+}
+
+.event-editor-layout > :first-child {
+  display: none;
+}
+
+.event-editor-layout > .object-browser-side-panel {
+  width: 100% !important;
+  border-left: 0;
 }
 
 .table-info-action-button {
