@@ -2429,6 +2429,12 @@ export default {
     effortUnsupported: "This model does not support configurable effort",
     configNameEmpty: "Config name cannot be empty",
     configNameExists: "Config name '{name}' already exists",
+    deepLinkInvalid: "Unable to open AI configuration link: {message}",
+    deepLinkClipboardTitle: "Import API Key",
+    deepLinkClipboardPrompt: "Read the API key from the clipboard?",
+    deepLinkClipboardEmpty: "The clipboard does not contain an API key. Enter it manually.",
+    deepLinkClipboardInvalid: "The clipboard does not contain a valid single-line API key. Enter it manually.",
+    deepLinkClipboardReadFailed: "Failed to read the clipboard: {message}",
 
     configList: "AI Config List",
     addConfig: "Add Config",

@@ -2353,6 +2353,12 @@ export default withEnglishFallback({
     effortUnsupported: "此模型不支持设置推理强度",
     configNameEmpty: "配置名称不能为空",
     configNameExists: "配置名称 '{name}' 已存在",
+    deepLinkInvalid: "无法打开 AI 配置链接：{message}",
+    deepLinkClipboardTitle: "导入 API Key",
+    deepLinkClipboardPrompt: "是否从剪贴板读取 API Key？",
+    deepLinkClipboardEmpty: "剪贴板中没有可用的 API Key，请手动填写。",
+    deepLinkClipboardInvalid: "剪贴板内容不是有效的单行 API Key，请手动填写。",
+    deepLinkClipboardReadFailed: "读取剪贴板失败：{message}",
 
     configList: "AI 配置列表",
     addConfig: "新增配置",
