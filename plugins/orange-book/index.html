@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>DBX 插件橙皮书</title>
+<meta name="author" content="DASungta">
 <meta name="description" content="DBX 插件平台的架构设计、安全设计与插件开发实战：Manifest v1、Host API 1.4、Sidecar 协议 v1、商店签名与安装校验。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -193,6 +194,8 @@ kbd {
   border-radius: 999px;
 }
 .cover-base { margin: 18px 0 0; font-size: 14px; max-width: 40em; line-height: 1.7; }
+.cover-author { margin: 14px 0 0; font-family: var(--font-mono); font-size: 13.5px; font-weight: 600; letter-spacing: 0.04em; }
+.cover-author a { color: inherit; text-decoration-thickness: 1.5px; }
 .cover-base code { background: rgba(27, 18, 11, 0.1); color: inherit; }
 .cover-art { width: 100%; max-width: 420px; justify-self: center; display: block; }
 .cover-art .plate { animation: plate-rise 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both; animation-delay: calc(var(--i) * 90ms); }
@@ -592,6 +595,7 @@ details.tableview summary { cursor: pointer; color: var(--ink-2); }
         <li>Sidecar 协议 v1</li>
         <li>Catalog v1</li>
       </ul>
+      <p class="cover-author">作者 <a href="https://github.com/DASungta">@DASungta</a></p>
       <p class="cover-base">依据 <code>t8y2/dbx</code> main@1539c9ac（DBX 0.6.29）与 <code>t8y2/dbx-store</code>@662b7a1 的源码和文档编写，同步日期 2026-10-01。</p>
     </div>
     <svg class="cover-art" viewBox="0 0 400 340" role="img" aria-label="一个 .dbxp 包从上到下的分层：签名、校验和清单、manifest、原生二进制、沙箱 UI 与图标资源">
@@ -660,7 +664,7 @@ details.tableview summary { cursor: pointer; color: var(--ink-2); }
       <li><a href="#appB"><span class="n">B</span><span>附录：源码地图</span></a></li>
       <li><a href="#appC"><span class="n">C</span><span>附录：术语表</span></a></li>
     </ol>
-    <p class="toc-meta">DBX 0.6.29 · Host API 1.4.0<br>同步于 2026-10-01</p>
+    <p class="toc-meta">作者 @DASungta<br>DBX 0.6.29 · Host API 1.4.0<br>同步于 2026-10-01</p>
   </nav>
 
   <main class="content" id="main">
@@ -2679,6 +2683,7 @@ fn main() -&gt; std::io::Result&lt;()&gt; {
 
     <section class="chapter colophon" aria-label="版本说明">
       <h3 style="margin-top: 0">版本说明</h3>
+      <p>作者：<a href="https://github.com/DASungta">@DASungta</a></p>
       <p>本书依据 <code>t8y2/dbx</code> main@1539c9ac（DBX 0.6.29，2026-10-01）的源码与文档，以及 <code>t8y2/dbx-store</code>@662b7a1 的目录数据整理；第 7 章的插件拆解另参考了 <code>t8y2/dbx-plugin-s3</code>@0b89bcd。平台仍在快速演进，书中内容与源码不一致时，以源码为准。</p>
       <p>这是一份依据公开源码整理的学习资料，不是 DBX 官方文档。官方的插件开发文档见 <a href="https://dbxio.com/cn/docs/plugin-development">dbxio.com/cn/docs/plugin-development</a>，官方商店仓库是 <a href="https://github.com/t8y2/dbx-store">github.com/t8y2/dbx-store</a>。</p>
       <p>示例中的哈希值、连接 ID 与端口为示意；封面条码是官方商店中 <code>io.dbx.ssh</code> 0.7.2 的真实目录记录。</p>
