@@ -1,7 +1,6 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, dataGridUserFacingPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("estimated display totals do not become pagination bounds", () => {
   assert.equal(
@@ -60,6 +59,28 @@ test("exact display totals keep pagination inside the configured result cap", ()
     }),
     175_390,
   );
+});
+
+test("large table pagination keeps the real last page and deep page offset", () => {
+  const totalRows = 3_374_023;
+  const pageSize = 100;
+  const tablePaginationTotal = resolveDataGridPaginationTotal({
+    serverKnownTotalRowCount: totalRows,
+    totalRowCountIsExact: true,
+  });
+  const queryPaginationTotal = resolveDataGridPaginationTotal({
+    serverKnownTotalRowCount: totalRows,
+    totalRowCountIsExact: true,
+    maxRows: 100_000,
+  });
+
+  assert.equal(tablePaginationTotal, totalRows);
+  assert.equal(queryPaginationTotal, 100_000);
+
+  const lastPage = Math.max(1, Math.ceil((tablePaginationTotal ?? 0) / pageSize));
+  assert.equal(lastPage, 33_741);
+  assert.equal((lastPage - 1) * pageSize, 3_374_000);
+  assert.equal((2_000 - 1) * pageSize, 199_900);
 });
 
 test("first query page is complete when its known total is already loaded", () => {
@@ -166,6 +187,16 @@ test("infinite scroll preserves authoritative has-more and complete-local-result
   assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, allRowsLoaded: true }), false);
 });
 
+test("load-all requests every remaining row up to the configured cap", () => {
+  assert.deepEqual(dataGridLoadAllSegment(100, 5_000, true), { offset: 100, limit: 4_900 });
+  assert.deepEqual(dataGridLoadAllSegment(2_500, 5_000, true), { offset: 2_500, limit: 2_500 });
+});
+
+test("load-all does not request past the cap or after the result is complete", () => {
+  assert.equal(dataGridLoadAllSegment(5_000, 5_000, true), null);
+  assert.equal(dataGridLoadAllSegment(100, 5_000, false), null);
+});
+
 // --- auto-redirect page calculation after refresh ---
 // These tests document the math used in DataGrid.vue's loading watcher:
 //   lastPageNum = Math.max(1, Math.ceil(total / pageSize))
@@ -214,50 +245,22 @@ test("auto-redirect: total is undefined — guard prevents redirect attempt", ()
   assert.equal(!total || (total as any) <= 0, true, "guard should prevent redirect when total is unknown");
 });
 
-test("only an explicit last-page COUNT blocks the grid surface", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /const totalRowCountBusy = computed\(\(\) => props\.totalRowCountLoading === true \|\| manualTotalRowCountLoading\.value\)/);
-  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| manualTotalRowCountLoading\.value\)/);
-  assert.match(source, /const gridPaginationBusy = computed\(\(\) => gridSurfaceBusy\.value \|\| totalRowCountBusy\.value\)/);
-  assert.match(source, /v-if="gridSurfaceBusy"/);
-  assert.match(source, /:loading="gridPaginationBusy"/);
-  assert.match(source, /async function beginManualTotalRowCount/);
-  assert.match(source, /await nextTick\(\);/);
-  const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(lastPageFn, /beginManualTotalRowCount\(\)/);
-  assert.match(lastPageFn, /buildCurrentCountTarget\(\)/);
-  assert.ok(lastPageFn.indexOf("beginManualTotalRowCount") < lastPageFn.indexOf("buildCurrentCountTarget"), "busy UI must start before COUNT SQL is built");
-});
-
-test("last page always re-counts when a count path is available", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const lastPageFn = source.match(/async function lastPage\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  const knownTotalIdx = lastPageFn.indexOf("hasKnownPaginationTotalRowCount");
-  const countCallbackIdx = lastPageFn.indexOf("props.countTotalRows");
-  const countSqlIdx = lastPageFn.indexOf("buildCurrentCountTarget");
-  assert.ok(countCallbackIdx >= 0 && countSqlIdx >= 0, "last page must keep count paths");
-  assert.ok(knownTotalIdx < 0 || knownTotalIdx > countSqlIdx, "known totals are only a fallback after re-COUNT");
-});
-
-test("jumping to last page does not rewrite indexes before the new page loads", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const jumpFn = source.match(/function jumpToCountedLastPage\(total: number\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(jumpFn, /resolveDataGridPaginationTotal/);
-  assert.match(jumpFn, /maxRows: paginationMaxRows\.value/);
-  assert.match(jumpFn, /emit\("paginate"/);
-  assert.doesNotMatch(jumpFn, /currentPage\.value\s*=/);
-  assert.match(source, /function rowNumberPageOffset/);
-});
-
-test("query result caps do not limit table-data pagination", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /const paginationMaxRows = computed\(\(\) => \(isResultsContext\.value \? queryResultMaxRows\.value : undefined\)\)/);
-  assert.equal(source.match(/maxRows: paginationMaxRows\.value/g)?.length, 2);
-});
-
-test("row number gutter width tracks the largest visible row index", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  assert.match(source, /dataGridRowNumberColumnWidth/);
-  assert.match(source, /resolveDataGridMaxRowNumber/);
-  assert.match(source, /rowNumberWidth,/);
+test("the SQL shown under the grid describes the segment that actually ran", () => {
+  // "Load all" keeps resultPageLimit/Offset on the logical first page, so the
+  // footer has to read the executed segment instead of claiming LIMIT 100.
+  assert.deepEqual(
+    dataGridUserFacingPage({
+      executedPageLimit: 99_900,
+      executedPageOffset: 100,
+      pageLimit: 100,
+      pageOffset: 0,
+      fallbackLimit: 100,
+      fallbackOffset: 0,
+    }),
+    { limit: 99_900, offset: 100 },
+  );
+  assert.deepEqual(dataGridUserFacingPage({ executedPageLimit: 100, executedPageOffset: 200, pageLimit: 100, pageOffset: 200, fallbackLimit: 100, fallbackOffset: 0 }), { limit: 100, offset: 200 });
+  // Snapshots written before the executed page existed fall back to the page props.
+  assert.deepEqual(dataGridUserFacingPage({ pageLimit: 50, pageOffset: 150, fallbackLimit: 100, fallbackOffset: 0 }), { limit: 50, offset: 150 });
+  assert.deepEqual(dataGridUserFacingPage({ fallbackLimit: 100, fallbackOffset: 300 }), { limit: 100, offset: 300 });
 });

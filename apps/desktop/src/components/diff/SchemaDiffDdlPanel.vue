@@ -9,7 +9,7 @@ import { DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { useDiffScrollSync } from "@/composables/useDiffScrollSync";
 import { buildHunks, type DiffLine } from "@/components/diff/DiffHunkBuilder";
 import { buildSchemaDiffHighlightSegments, type SchemaDiffHighlightSegment } from "@/lib/schema/schemaDiffHighlight";
-import { findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
+import { findFirstSchemaDiffChangedLineNumber, findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
 import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
 import { FileCode, ScrollText, Copy, Play, FileDiff } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
@@ -39,6 +39,7 @@ const props = defineProps<{
   focusedObject?: SchemaDiffObject | null;
   deploySql: string;
   deploySqlAll: string;
+  rollbackForwardSql?: string;
   compatibilityWarnings?: CompatibilityWarning[];
   rollbackSql?: string;
   deploySqlMode?: "forward" | "rollback";
@@ -71,7 +72,7 @@ const rollbackConnectorKey = ref(0);
 
 const rollbackHunks = computed(() => {
   if (!props.rollbackSql) return [];
-  return buildHunks(props.deploySql, props.rollbackSql);
+  return buildHunks(props.rollbackForwardSql ?? props.deploySql, props.rollbackSql);
 });
 
 const hunks = computed(() => {
@@ -205,14 +206,19 @@ function scrollPaneToLine(pane: HTMLDivElement | undefined, lineNumber: number |
 function locateFocusedObject() {
   const selectedObject = props.selectedObject;
   const focusedObject = props.focusedObject;
-  if (!selectedObject || !focusedObject || focusedObject.id === selectedObject.id) {
+  if (!selectedObject || !focusedObject) {
     focusedSourceLineNumber.value = null;
     focusedTargetLineNumber.value = null;
     return;
   }
 
-  focusedSourceLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.sourceDdl ?? "", focusedObject, "source");
-  focusedTargetLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.targetDdl ?? "", focusedObject, "target");
+  if (focusedObject.id === selectedObject.id) {
+    focusedSourceLineNumber.value = focusedObject.operationType === "modify" ? findFirstSchemaDiffChangedLineNumber(hunks.value, "source") : null;
+    focusedTargetLineNumber.value = focusedObject.operationType === "modify" ? findFirstSchemaDiffChangedLineNumber(hunks.value, "target") : null;
+  } else {
+    focusedSourceLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.sourceDdl ?? "", focusedObject, "source");
+    focusedTargetLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.targetDdl ?? "", focusedObject, "target");
+  }
   scrollPaneToLine(leftPaneRef.value, focusedSourceLineNumber.value);
   scrollPaneToLine(rightPaneRef.value, focusedTargetLineNumber.value);
 }
@@ -463,10 +469,6 @@ function copyDeploySqlAll() {
           <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" @click="copyDeploySql">
             <Copy class="w-3 h-3" />
             {{ t("diff.copy") }}
-          </Button>
-          <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" :disabled="canExecute === false" @click="$emit('executeScript')">
-            <Play class="w-3 h-3" />
-            {{ t("diff.execute") }}
           </Button>
         </div>
       </div>

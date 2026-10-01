@@ -77,6 +77,30 @@ function updateKind(name: string, kind: SqlParameterValueKind) {
   values.value[name] = { ...current, kind, value };
 }
 
+function setAllParametersToRaw() {
+  const next = { ...values.value };
+  for (const parameter of props.parameters) {
+    const current = next[parameter.key] ?? { kind: "string", value: "" };
+    next[parameter.key] = { ...current, kind: "raw" };
+  }
+  values.value = next;
+}
+
+function clearParameterValues() {
+  const next = { ...values.value };
+  for (const parameter of props.parameters) {
+    const current = next[parameter.key] ?? { kind: "string", value: "" };
+    next[parameter.key] = { ...current, value: "" };
+  }
+  activeHistoryName.value = "";
+  values.value = next;
+}
+
+function ignoreParameters() {
+  open.value = false;
+  emit("execute", props.sql);
+}
+
 function updateValue(name: string, value: string) {
   const matchedHistory = histories.value[name]?.find((entry) => entry.value === value);
   values.value[name] = { ...(values.value[name] ?? { kind: "string" }), ...(matchedHistory ? { kind: matchedHistory.kind } : {}), value };
@@ -126,7 +150,7 @@ async function copyResolvedSql() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <Braces class="h-5 w-5 text-primary" />
@@ -135,7 +159,15 @@ async function copyResolvedSql() {
       </DialogHeader>
 
       <div class="grid max-h-[calc(86vh-8rem)] gap-4 overflow-y-auto pr-1">
-        <p class="text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
+        <div class="flex flex-wrap items-center gap-2">
+          <p class="min-w-0 flex-1 text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
+          <Button type="button" size="sm" variant="outline" class="shrink-0" data-testid="sql-parameters-clear-values" @click="clearParameterValues">
+            {{ t("sqlParameters.clearValues") }}
+          </Button>
+          <Button type="button" size="sm" variant="outline" class="ml-auto shrink-0" data-testid="sql-parameters-use-raw-all" @click="setAllParametersToRaw">
+            {{ t("sqlParameters.useRawForAll") }}
+          </Button>
+        </div>
 
         <div class="relative z-20 max-h-[302px] overflow-auto rounded-md border bg-background">
           <div class="min-w-[680px]">
@@ -199,6 +231,9 @@ async function copyResolvedSql() {
       </div>
 
       <DialogFooter>
+        <Button type="button" variant="outline" data-testid="sql-parameters-ignore" @click="ignoreParameters">
+          {{ t("sqlParameters.ignore") }}
+        </Button>
         <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button variant="outline" @click="copyResolvedSql">
           <Copy class="mr-1.5 h-4 w-4" />

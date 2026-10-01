@@ -9,7 +9,72 @@ import zipfile
 from pathlib import Path
 
 from build_driver_zips import build_driver_zips, remove_raw_driver_artifacts
+from validate_agents import CRATE_NATIVE_AGENT_MODULES, NATIVE_ONLY_AGENT_MODULES
 from version_agent_artifacts import NATIVE_DRIVERS, version_agent_artifacts
+
+
+AGENTS_ROOT = Path(__file__).resolve().parent.parent
+
+
+def native_only_modules() -> set[str]:
+    declared = {
+        name
+        for name, relative in {**NATIVE_ONLY_AGENT_MODULES, **CRATE_NATIVE_AGENT_MODULES}.items()
+        if (AGENTS_ROOT / relative).exists()
+    }
+    return declared
+
+
+class NativeReleaseCoverageTest(unittest.TestCase):
+    """Guards the hand-maintained native module list in the release packaging.
+
+    `version_agent_artifacts` renames `dbx-agent-<module>-<platform>` into the
+    versioned name the registry generator looks for. A native module missing from
+    its list is not a loud failure: the raw artifact is dropped, the module never
+    reaches `agent-registry.json`, and the driver simply disappears from the app.
+    `oracle-oci` was lost exactly that way, so cross-check the list against the
+    modules `validate_agents` treats as native-only rather than trusting it to be
+    maintained by hand.
+    """
+
+    def test_lists_every_native_only_module(self) -> None:
+        declared = native_only_modules()
+        listed = set(NATIVE_DRIVERS)
+
+        self.assertEqual(
+            sorted(listed - declared),
+            [],
+            "NATIVE_DRIVERS lists entries validate_agents no longer declares native-only",
+        )
+        self.assertEqual(
+            sorted(declared - listed),
+            [],
+            "native-only modules missing from version_agent_artifacts.NATIVE_DRIVERS",
+        )
+
+    def test_every_listed_module_has_a_version(self) -> None:
+        versions = json.loads((AGENTS_ROOT / "versions.json").read_text(encoding="utf-8"))
+
+        missing = sorted(name for name in NATIVE_DRIVERS if not versions.get(name))
+
+        self.assertEqual(missing, [], "native modules without a versions.json entry")
+
+    def test_versions_platform_limited_native_artifacts(self) -> None:
+        # A module published for one platform only (Oracle OCI is Windows x64)
+        # must still be versioned; platforms it does not publish are skipped.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            source = release_dir / "dbx-agent-oracle-oci-windows-x64.exe"
+            source.write_bytes(b"MZtest-oracle-oci-agent")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+            versions["oracle-oci"] = "0.1.7"
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned = release_dir / "dbx-agent-oracle-oci-0.1.7-windows-x64.exe"
+
+            self.assertEqual(renamed, [versioned])
+            self.assertFalse(source.exists())
+            self.assertEqual(versioned.read_bytes(), b"MZtest-oracle-oci-agent")
 
 
 class DriverReleasePackagesTest(unittest.TestCase):
@@ -28,17 +93,25 @@ class DriverReleasePackagesTest(unittest.TestCase):
             rocketmq_source.write_bytes(b"MZtest-rocketmq-agent")
             cassandra_source = release_dir / "dbx-agent-cassandra-linux-x64"
             cassandra_source.write_bytes(b"\x7fELFtest-cassandra-agent")
+            nebula_source = release_dir / "dbx-agent-nebula-linux-aarch64"
+            nebula_source.write_bytes(b"\x7fELFtest-nebula-agent")
             tdengine_source = release_dir / "dbx-agent-tdengine-windows-aarch64.exe"
             tdengine_source.write_bytes(b"MZtest-tdengine-agent")
+            etcd_source = release_dir / "dbx-agent-etcd-linux-x64"
+            etcd_source.write_bytes(b"\x7fELFtest-etcd-agent")
+            etcd2_source = release_dir / "dbx-agent-etcd2-macos-aarch64"
+            etcd2_source.write_bytes(b"test-etcd2-agent")
             java_source = release_dir / "dbx-agent-h2.jar"
             java_source.write_bytes(b"test-jar")
             versions = {
                 "h2": "0.2.5",
                 "oracle": "0.1.10",
+                "oracle-oci": "0.1.0",
                 "xugu": "0.1.20",
                 "kingbase": "0.1.34",
                 "iotdb": "0.1.30",
                 "neo4j": "0.1.40",
+                "nebula": "0.1.0",
                 "vastbase": "0.1.37",
                 "duckdb": "0.1.0",
                 "rabbitmq": "0.1.0",
@@ -46,7 +119,12 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "zookeeper": "0.1.0",
                 "cassandra": "0.1.37",
                 "hive": "0.1.43",
+                "argo": "0.1.0",
                 "tdengine": "0.1.0",
+                "etcd": "0.1.40",
+                "etcd2": "0.1.0",
+                "argo": "0.1.0",
+                "sqlite-worker": "0.1.0",
             }
 
             renamed = version_agent_artifacts(release_dir, versions)
@@ -57,18 +135,24 @@ class DriverReleasePackagesTest(unittest.TestCase):
             versioned_rabbitmq = release_dir / "dbx-agent-rabbitmq-0.1.0-linux-x64"
             versioned_rocketmq = release_dir / "dbx-agent-rocketmq-0.1.0-windows-x64.exe"
             versioned_cassandra = release_dir / "dbx-agent-cassandra-0.1.37-linux-x64"
+            versioned_nebula = release_dir / "dbx-agent-nebula-0.1.0-linux-aarch64"
             versioned_tdengine = release_dir / "dbx-agent-tdengine-0.1.0-windows-aarch64.exe"
+            versioned_etcd = release_dir / "dbx-agent-etcd-0.1.40-linux-x64"
+            versioned_etcd2 = release_dir / "dbx-agent-etcd2-0.1.0-macos-aarch64"
             self.assertEqual(
                 renamed,
                 [
                     versioned_java,
                     versioned_cassandra,
                     versioned_native,
+                    versioned_nebula,
                     versioned_vastbase,
                     versioned_duckdb,
                     versioned_rabbitmq,
                     versioned_rocketmq,
                     versioned_tdengine,
+                    versioned_etcd,
+                    versioned_etcd2,
                 ],
             )
 
@@ -245,8 +329,11 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 [
                     versioned_cassandra,
                     versioned_duckdb,
+                    versioned_etcd,
+                    versioned_etcd2,
                     versioned_java,
                     versioned_native,
+                    versioned_nebula,
                     versioned_rabbitmq,
                     versioned_rocketmq,
                     versioned_tdengine,
@@ -269,6 +356,20 @@ class DriverReleasePackagesTest(unittest.TestCase):
             self.assertEqual(renamed, [versioned])
             self.assertFalse(source.exists())
             self.assertEqual(versioned.read_bytes(), b"\xcf\xfa\xed\xfetest-neo4j-agent")
+
+    def test_versions_nebula_native_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            source = release_dir / "dbx-agent-nebula-linux-aarch64"
+            source.write_bytes(b"\x7fELFtest-nebula-agent")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned = release_dir / "dbx-agent-nebula-0.1.0-linux-aarch64"
+
+            self.assertEqual(renamed, [versioned])
+            self.assertFalse(source.exists())
+            self.assertEqual(versioned.read_bytes(), b"\x7fELFtest-nebula-agent")
 
     def test_versions_iotdb_native_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -314,6 +415,25 @@ class DriverReleasePackagesTest(unittest.TestCase):
             self.assertEqual(renamed, [versioned])
             self.assertFalse(source.exists())
             self.assertEqual(versioned.read_bytes(), b"\x7fELFtest-zookeeper-agent")
+
+    def test_versions_sqlite_worker_native_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            x64 = release_dir / "dbx-agent-sqlite-worker-linux-x64"
+            arm = release_dir / "dbx-agent-sqlite-worker-linux-aarch64"
+            x64.write_bytes(b"\x7fELFtest-sqlite-worker-x64")
+            arm.write_bytes(b"\x7fELFtest-sqlite-worker-arm")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned_x64 = release_dir / "dbx-agent-sqlite-worker-0.1.0-linux-x64"
+            versioned_arm = release_dir / "dbx-agent-sqlite-worker-0.1.0-linux-aarch64"
+
+            self.assertEqual(renamed, [versioned_arm, versioned_x64])
+            self.assertFalse(x64.exists())
+            self.assertFalse(arm.exists())
+            self.assertEqual(versioned_x64.read_bytes(), b"\x7fELFtest-sqlite-worker-x64")
+            self.assertEqual(versioned_arm.read_bytes(), b"\x7fELFtest-sqlite-worker-arm")
 
     def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

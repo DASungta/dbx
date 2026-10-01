@@ -35,6 +35,14 @@ export interface TableImportProgressLike {
 
 export type TableImportWizardStep = "source" | "options" | "mapping" | "review" | "execution";
 
+export const TABLE_IMPORT_ENCODING_OPTIONS: ReadonlyArray<{ value: TableImportTextEncoding; labelKey: string }> = [
+  { value: "auto", labelKey: "tableImport.encodingAuto" },
+  { value: "utf8", labelKey: "tableImport.encodingUtf8" },
+  { value: "gbk", labelKey: "tableImport.encodingGbk" },
+  { value: "utf16Le", labelKey: "tableImport.encodingUtf16Le" },
+  { value: "utf16Be", labelKey: "tableImport.encodingUtf16Be" },
+];
+
 export const TABLE_IMPORT_WIZARD_STEPS: TableImportWizardStep[] = ["source", "options", "mapping", "review", "execution"];
 
 export function formatTableImportElapsed(ms: number): string {
@@ -78,6 +86,7 @@ export function tableImportProgressPercent(progress: TableImportProgressLike | n
 export interface TableImportParseSettings {
   format: TableImportSourceFormat;
   delimiter: string;
+  decimalSeparator?: "." | ",";
   textEncoding: TableImportTextEncoding;
   titleRow: number;
   dataStartRow: number;
@@ -86,24 +95,40 @@ export interface TableImportParseSettings {
   emptyStringAsNull: boolean;
   sheetName?: string;
   jsonShape: TableImportJsonShape;
+  databaseType?: DatabaseType | null;
 }
 
-export function defaultTableImportEmptyStringAsNull(format: TableImportSourceFormat): boolean {
-  return format !== "excel";
+/**
+ * 导入时分隔文本的「空字段即 NULL」默认值。
+ *
+ * 导出端默认把 NULL 写成 `\N` 字面量、空字符串才写成空字段，所以导入端默认必须
+ * 保留空字段（不当作 NULL），否则 DBX 自己导出的 CSV 在导入时会把空字符串还原成
+ * NULL，写回 `NOT NULL DEFAULT ''` 的列就会报「不允许为 null」。
+ */
+export function defaultTableImportEmptyStringAsNull(_format: TableImportSourceFormat): boolean {
+  return false;
 }
 
 export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
   const isDelimited = settings.format === "csv" || settings.format === "tsv" || settings.format === "delimited";
+  // SQL 脚本与分隔文本一样是纯文本源，需要传递编码供后端解码（支持 GBK 等常见转储编码）
+  const isTextSource = isDelimited || settings.format === "sql";
   return {
     delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
-    encoding: isDelimited ? settings.textEncoding : null,
+    decimalSeparator: isDelimited ? (settings.decimalSeparator ?? ".") : null,
+    encoding: isTextSource ? settings.textEncoding : null,
     titleRow: settings.titleRow,
     dataStartRow: settings.dataStartRow,
     lastDataRow: settings.lastDataRow,
     trimValues: settings.trimValues,
     emptyStringAsNull: settings.emptyStringAsNull,
+    // 勾选「空字符串作为 NULL」= 退回旧行为：关闭 NULL 字面量，空字段一律当 NULL。
+    // 不勾选时留空，由后端使用与导出端一致的默认字面量 `\N`。
+    nullLiteral: settings.emptyStringAsNull ? "" : undefined,
     sheetName: settings.format === "excel" ? settings.sheetName || null : null,
     jsonShape: settings.format === "json" ? settings.jsonShape : null,
+    // SQL 脚本需要按源方言解析字符串转义与标识符大小写（取目标连接的数据库类型）
+    sqlDialect: settings.format === "sql" ? (settings.databaseType ?? null) : null,
   };
 }
 
@@ -267,7 +292,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "sqlserver") return "NVARCHAR(MAX)";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "CLOB";
       if (databaseType === "clickhouse") return "String";
-      if (["hive", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
+      if (["hive", "argo", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
       return "TEXT";
   }
 }

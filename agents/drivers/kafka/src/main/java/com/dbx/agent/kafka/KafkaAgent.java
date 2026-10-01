@@ -46,6 +46,12 @@ public final class KafkaAgent {
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
     private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
+    private static final Set<String> SASL_MECHANISMS_WITHOUT_SERVER_NAME = Set.of(
+        "PLAIN",
+        "SCRAM-SHA-256",
+        "SCRAM-SHA-512",
+        "OAUTHBEARER"
+    );
     private static final Set<String> KERBEROS_SYSTEM_PROPERTY_KEYS = Set.of(
         "java.security.krb5.conf",
         "sun.security.krb5.debug",
@@ -134,8 +140,17 @@ public final class KafkaAgent {
             case "handshake" -> handshakeResult();
             case "connect" -> connect(params);
             case "test_connection" -> testConnection(params);
-            case "disconnect" -> { closeClients(); yield Collections.singletonMap("ok", true); }
-            case "shutdown" -> { closeClients(); shutdownRequested = true; yield Collections.singletonMap("ok", true); }
+            case "disconnect" -> {
+                closeClients();
+                DbxInetAddressResolverProvider.setAvoidReverseDns(false);
+                yield Collections.singletonMap("ok", true);
+            }
+            case "shutdown" -> {
+                closeClients();
+                DbxInetAddressResolverProvider.setAvoidReverseDns(false);
+                shutdownRequested = true;
+                yield Collections.singletonMap("ok", true);
+            }
             // Topic management
             case "mq_list_topics" -> listTopics(params);
             case "mq_create_topic" -> createTopic(params);
@@ -175,6 +190,9 @@ public final class KafkaAgent {
 
     private static Object connect(JsonObject params) throws Exception {
         JsonObject conn = resolveBrokerConnection(connectionObject(params));
+        boolean previousReverseDnsMode = DbxInetAddressResolverProvider.setAvoidReverseDns(
+            shouldAvoidSaslReverseDns(conn)
+        );
         Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
         AdminClient nextAdmin = null;
         KafkaProducer<String, byte[]> nextProducer = null;
@@ -198,12 +216,16 @@ public final class KafkaAgent {
                 nextProducer.close(Duration.ofSeconds(5));
             }
             restoreKerberosSystemProperties(previousKerberosSystemProperties);
+            DbxInetAddressResolverProvider.setAvoidReverseDns(previousReverseDnsMode);
             throw e;
         }
     }
 
     private static Object testConnection(JsonObject params) throws Exception {
         JsonObject conn = resolveBrokerConnection(connectionObject(params));
+        boolean previousReverseDnsMode = DbxInetAddressResolverProvider.setAvoidReverseDns(
+            shouldAvoidSaslReverseDns(conn)
+        );
         Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
         AdminClient probe = null;
         try {
@@ -244,6 +266,7 @@ public final class KafkaAgent {
                 probe.close(Duration.ofSeconds(5));
             }
             restoreKerberosSystemProperties(previousKerberosSystemProperties);
+            DbxInetAddressResolverProvider.setAvoidReverseDns(previousReverseDnsMode);
         }
     }
 
@@ -470,6 +493,25 @@ public final class KafkaAgent {
         return protocol.isBlank() ? "PLAINTEXT" : protocol;
     }
 
+    static boolean shouldAvoidSaslReverseDns(JsonObject conn) {
+        JsonObject properties = connectionProperties(conn);
+        String configuredProtocol = stringProperty(properties, "security.protocol");
+        String protocol = configuredProtocol == null || configuredProtocol.isBlank()
+            ? securityProtocol(conn)
+            : configuredProtocol;
+        if (!protocol.trim().toUpperCase(Locale.ROOT).startsWith("SASL_")) {
+            return false;
+        }
+
+        String mechanism = stringOrEmpty(conn, "sasl_mechanism");
+        if (mechanism.isBlank()) mechanism = stringOrEmpty(conn, "saslMechanism");
+        String configuredMechanism = stringProperty(properties, "sasl.mechanism");
+        if (configuredMechanism != null && !configuredMechanism.isBlank()) {
+            mechanism = configuredMechanism;
+        }
+        return SASL_MECHANISMS_WITHOUT_SERVER_NAME.contains(mechanism.trim().toUpperCase(Locale.ROOT));
+    }
+
     static void applySecurityProperties(JsonObject conn, Properties props) {
         String securityProtocol = stringOrEmpty(conn, "security_protocol");
         if (securityProtocol.isBlank()) {
@@ -507,16 +549,9 @@ public final class KafkaAgent {
             }
         }
 
+        // TLS properties
         JsonObject tls = conn.has("tls") && conn.get("tls").isJsonObject()
             ? conn.getAsJsonObject("tls") : null;
-        boolean skipVerify = boolOrDefault(conn, "tls_skip_verify", false)
-            || boolOrDefault(conn, "tlsSkipVerify", false)
-            || (tls != null && boolOrDefault(tls, "skip_verify", false));
-        if (skipVerify) {
-            props.put("ssl.endpoint.identification.algorithm", "");
-        }
-
-        // TLS properties
         if (tls != null) {
             String truststorePath = stringOrEmpty(tls, "truststore_path");
             if (!truststorePath.isBlank()) {
@@ -540,6 +575,20 @@ public final class KafkaAgent {
     static void applyConnectionProperties(JsonObject conn, Properties props) {
         applySecurityProperties(conn, props);
         applyExtraProperties(conn, props);
+        applyTlsSkipVerification(conn, props);
+    }
+
+    private static void applyTlsSkipVerification(JsonObject conn, Properties props) {
+        JsonObject tls = conn.has("tls") && conn.get("tls").isJsonObject()
+            ? conn.getAsJsonObject("tls") : null;
+        boolean skipVerify = boolOrDefault(conn, "tls_skip_verify", false)
+            || boolOrDefault(conn, "tlsSkipVerify", false)
+            || (tls != null && boolOrDefault(tls, "skip_verify", false));
+        if (!skipVerify) return;
+
+        DbxInsecureTrustManagerFactory.ensureRegistered();
+        props.put("ssl.endpoint.identification.algorithm", "");
+        props.put("ssl.trustmanager.algorithm", DbxInsecureTrustManagerFactory.ALGORITHM);
     }
 
     static String jaasValue(String value) {
@@ -643,8 +692,14 @@ public final class KafkaAgent {
                 topics.add(topic);
             }
         } catch (Exception error) {
-            if (!isUnsupportedVersionError(error)) {
+            if (!isUnsupportedVersionError(error) && !isTimeoutError(error)) {
                 throw error;
+            }
+            if (isTimeoutError(error)) {
+                logger().warn(
+                    "Kafka topic descriptions timed out; returning topic names without partition metadata",
+                    error
+                );
             }
             for (TopicListing listing : listings) {
                 Map<String, Object> topic = new LinkedHashMap<>();
@@ -956,20 +1011,182 @@ public final class KafkaAgent {
     private static Object listConsumerGroups(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
+        String filterTopic = stringOrEmpty(params, "topic");
+
         Collection<ConsumerGroupListing> groups = admin.listConsumerGroups(
                 new ListConsumerGroupsOptions().timeoutMs(timeout))
             .all().get(timeout, TimeUnit.MILLISECONDS);
 
+        List<String> groupIds = groups.stream()
+            .map(ConsumerGroupListing::groupId)
+            .sorted()
+            .toList();
+        if (groupIds.isEmpty()) {
+            return Collections.singletonMap("groups", Collections.emptyList());
+        }
+
+        // Batch-describe every group in one Kafka Admin request. Per-group
+        // failures degrade to an empty member list instead of failing the batch.
+        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
+        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
+            groupIds,
+            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                descriptions.put(
+                    groupId,
+                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
+                );
+            } catch (Exception error) {
+                logger().debug("Consumer group details unavailable for {}: {}", groupId, normalizeErrorMessage(error));
+            }
+        }
+
+        // Batch-resolve committed offsets for every group in one Admin request.
+        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
+        for (String groupId : groupIds) {
+            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
+        }
+        Map<String, Map<TopicPartition, OffsetAndMetadata>> committedOffsets = new HashMap<>();
+        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
+            offsetSpecs,
+            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                Map<TopicPartition, OffsetAndMetadata> rows = offsetsResult
+                    .partitionsToOffsetAndMetadata(groupId)
+                    .get(timeout, TimeUnit.MILLISECONDS);
+                committedOffsets.put(groupId, rows == null ? Collections.emptyMap() : rows);
+            } catch (Exception error) {
+                committedOffsets.put(groupId, Collections.emptyMap());
+                logger().debug("Committed offsets unavailable for {}: {}", groupId, normalizeErrorMessage(error));
+            }
+        }
+
+        // End offsets: one batched Admin request limited to the requested
+        // topic's partitions (deduplicated across groups). Without a topic
+        // filter no end offsets are resolved, keeping the listing cheap.
+        Map<TopicPartition, Long> endOffsets = new HashMap<>();
+        if (!filterTopic.isEmpty()) {
+            LinkedHashSet<TopicPartition> topicPartitions = new LinkedHashSet<>();
+            for (Map<TopicPartition, OffsetAndMetadata> rows : committedOffsets.values()) {
+                for (TopicPartition topicPartition : rows.keySet()) {
+                    if (topicPartition.topic().equals(filterTopic)) {
+                        topicPartitions.add(topicPartition);
+                    }
+                }
+            }
+            if (!topicPartitions.isEmpty()) {
+                Map<TopicPartition, OffsetSpec> endOffsetSpecs = new LinkedHashMap<>();
+                for (TopicPartition topicPartition : topicPartitions) {
+                    endOffsetSpecs.put(topicPartition, OffsetSpec.latest());
+                }
+                try {
+                    ListOffsetsResult latestOffsets = admin.listOffsets(
+                        endOffsetSpecs,
+                        new ListOffsetsOptions().timeoutMs(timeout)
+                    );
+                    for (TopicPartition topicPartition : topicPartitions) {
+                        try {
+                            ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
+                                .partitionResult(topicPartition)
+                                .get(timeout, TimeUnit.MILLISECONDS);
+                            endOffsets.put(topicPartition, info.offset());
+                        } catch (Exception error) {
+                            // Leave the partition absent so callers can tell an
+                            // unknown end offset (no lag contribution) apart from zero lag.
+                            logger().debug("End offset unavailable for {}: {}", topicPartition, normalizeErrorMessage(error));
+                        }
+                    }
+                } catch (Exception error) {
+                    logger().debug("End offset batch unavailable: {}", normalizeErrorMessage(error));
+                }
+            }
+        }
+
+        Map<String, ConsumerGroupListing> listingByGroup = groups.stream()
+            .collect(Collectors.toMap(ConsumerGroupListing::groupId, listing -> listing));
+
         List<Map<String, Object>> result = new ArrayList<>();
-        for (ConsumerGroupListing group : groups) {
+        for (String groupId : groupIds) {
+            ConsumerGroupListing listing = listingByGroup.get(groupId);
+            ConsumerGroupDescription description = descriptions.get(groupId);
+            Map<TopicPartition, OffsetAndMetadata> committed = committedOffsets.getOrDefault(groupId, Collections.emptyMap());
+
             Map<String, Object> g = new LinkedHashMap<>();
-            g.put("groupId", group.groupId());
-            g.put("state", group.state().map(Enum::name).orElse("UNKNOWN"));
-            g.put("simpleGroup", group.isSimpleConsumerGroup());
+            g.put("groupId", groupId);
+            g.put("state", listing == null ? "UNKNOWN" : listing.state().map(Enum::name).orElse("UNKNOWN"));
+            g.put("simpleGroup", listing != null && listing.isSimpleConsumerGroup());
+            g.put("members", memberMaps(description == null ? Collections.emptyList() : description.members()));
+            g.put("committedOffsets", offsetRows(committed, filterTopic));
+            g.put("endOffsets", endOffsetRows(committed, endOffsets, filterTopic));
             result.add(g);
         }
-        result.sort(Comparator.comparing(m -> (String) m.get("groupId")));
         return Collections.singletonMap("groups", result);
+    }
+
+    static List<Map<String, Object>> memberMaps(Collection<MemberDescription> members) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (MemberDescription member : members) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("memberId", member.consumerId());
+            m.put("clientId", member.clientId());
+            m.put("host", member.host());
+            List<Map<String, Object>> assignments = new ArrayList<>();
+            for (TopicPartition topicPartition : member.assignment().topicPartitions()) {
+                Map<String, Object> a = new LinkedHashMap<>();
+                a.put("topic", topicPartition.topic());
+                a.put("partition", topicPartition.partition());
+                assignments.add(a);
+            }
+            m.put("assignments", assignments);
+            result.add(m);
+        }
+        return result;
+    }
+
+    /** Committed offsets as rows, optionally restricted to one topic. */
+    static List<Map<String, Object>> offsetRows(Map<TopicPartition, OffsetAndMetadata> offsets, String topic) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
+            if (!topic.isEmpty() && !entry.getKey().topic().equals(topic)) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("topic", entry.getKey().topic());
+            row.put("partition", entry.getKey().partition());
+            row.put("offset", entry.getValue().offset());
+            rows.add(row);
+        }
+        rows.sort(Comparator.comparingInt(row -> (int) row.get("partition")));
+        return rows;
+    }
+
+    /** End offsets for a group's committed partitions, restricted to one topic. */
+    static List<Map<String, Object>> endOffsetRows(
+        Map<TopicPartition, OffsetAndMetadata> committed,
+        Map<TopicPartition, Long> endOffsets,
+        String topic
+    ) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (TopicPartition topicPartition : committed.keySet()) {
+            if (!topic.isEmpty() && !topicPartition.topic().equals(topic)) {
+                continue;
+            }
+            Long endOffset = endOffsets.get(topicPartition);
+            if (endOffset == null) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("topic", topicPartition.topic());
+            row.put("partition", topicPartition.partition());
+            row.put("offset", endOffset);
+            rows.add(row);
+        }
+        rows.sort(Comparator.comparingInt(row -> (int) row.get("partition")));
+        return rows;
     }
 
     private static Object getConsumerGroupSnapshot(JsonObject params) throws Exception {
@@ -2407,6 +2624,21 @@ public final class KafkaAgent {
             String message = current.getMessage() == null ? "" : current.getMessage().toLowerCase(Locale.ROOT);
             if (className.contains("UnsupportedVersionException")
                 || message.contains("unsupported version")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A topic listing is still useful when the broker cannot describe every topic before the
+     * request deadline. Keep timeout detection narrow so authorization, transport, and unknown
+     * topic failures remain visible to the caller instead of being mistaken for a partial result.
+     */
+    private static boolean isTimeoutError(Throwable error) {
+        for (Throwable current : causeChain(error)) {
+            if (current instanceof java.util.concurrent.TimeoutException
+                || current instanceof org.apache.kafka.common.errors.TimeoutException) {
                 return true;
             }
         }

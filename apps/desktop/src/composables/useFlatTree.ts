@@ -4,6 +4,25 @@ export const SIDEBAR_TREE_ROW_HEIGHT = 28;
 export const SIDEBAR_TREE_SCROLL_BUFFER = 600;
 export const SIDEBAR_TREE_PRERENDER_COUNT = 48;
 
+/**
+ * Sidebar trees at or above this many rows use the virtualized renderer.
+ * Smaller trees render plainly (all rows in the DOM). Virtualized rendering
+ * has a failure mode where the view pool stops matching the viewport when the
+ * tree mutates while scrolled (observed with the Dameng connection, whose
+ * subtree keeps streaming in new nodes) — a blank band appears below the last
+ * materialized row. Plain rendering cannot exhibit that failure, so keep
+ * small/medium trees off the virtual path.
+ */
+export const SIDEBAR_TREE_VIRTUALIZE_THRESHOLD = 500;
+
+/**
+ * Once a tree is virtualized it stays virtualized until the row count drops
+ * below THRESHOLD - HYSTERESIS. Switching renderers remounts the whole tree,
+ * so the hysteresis prevents search/filter oscillation around the threshold
+ * from thrashing between the two branches.
+ */
+export const SIDEBAR_TREE_VIRTUALIZE_HYSTERESIS = 50;
+
 export interface FlatTreeNode {
   node: TreeNode;
   depth: number;
@@ -23,6 +42,7 @@ export interface FlatTreeIndex {
   stickyContainerIndexByIndex: Int32Array;
   nextDatabaseContainerIndexByIndex: Int32Array;
   nextSchemaContainerIndexByIndex: Int32Array;
+  nextBoundaryIndexByIndex: Int32Array;
 }
 
 interface FlatTreeIndexOptions {
@@ -108,7 +128,7 @@ export function flatTreeRowsChanged(nodes: readonly FlatTreeNode[], previousNode
 }
 
 export function shouldVirtualizeFlatTree(count: number): boolean {
-  return count > 0;
+  return count >= SIDEBAR_TREE_VIRTUALIZE_THRESHOLD;
 }
 
 export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: FlatTreeIndexOptions): FlatTreeIndex {
@@ -121,9 +141,11 @@ export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: Fla
   const stickyContainerIndexByIndex = new Int32Array(nodes.length);
   const nextDatabaseContainerIndexByIndex = new Int32Array(nodes.length);
   const nextSchemaContainerIndexByIndex = new Int32Array(nodes.length);
+  const nextBoundaryIndexByIndex = new Int32Array(nodes.length);
   stickyContainerIndexByIndex.fill(-1);
   nextDatabaseContainerIndexByIndex.fill(-1);
   nextSchemaContainerIndexByIndex.fill(-1);
+  nextBoundaryIndexByIndex.fill(-1);
 
   let databaseContainerIndex = -1;
   let schemaContainerIndex = -1;
@@ -151,9 +173,12 @@ export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: Fla
 
   let nextDatabaseContainerIndex = -1;
   let nextSchemaContainerIndex = -1;
+  let nextBoundaryIndex = -1;
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const item = nodes[index];
+    nextBoundaryIndexByIndex[index] = nextBoundaryIndex;
     if (options.isBoundary(item.type)) {
+      nextBoundaryIndex = index;
       nextDatabaseContainerIndex = -1;
       nextSchemaContainerIndex = -1;
       continue;
@@ -174,5 +199,6 @@ export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: Fla
     stickyContainerIndexByIndex,
     nextDatabaseContainerIndexByIndex,
     nextSchemaContainerIndexByIndex,
+    nextBoundaryIndexByIndex,
   };
 }

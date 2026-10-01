@@ -1,7 +1,13 @@
 import type { EditorSettings } from "@/stores/settingsStore";
+import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
+import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { normalizeSqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
+import { normalizeTableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
+import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
+import { normalizeCsvNullMode } from "@/lib/export/csvNullMode";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "fontFamily",
@@ -10,20 +16,29 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "uiFontFamily",
   "uiScale",
   "theme",
+  "backgroundImage",
   "customThemes",
   "activeCustomThemeId",
   "executeMode",
   "executeAllOnBlankLine",
   "showExecutionTargetPicker",
   "showStatementRunButtons",
+  "showLineNumbers",
   "showCurrentStatementFrame",
   "showInsertValueHints",
   "autoAliasTables",
+  "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",
+  "sqlServerSpaceConfirmsCompletion",
   "sortCompletionColumnsAlphabetically",
+  "selectFirstCompletionOnOpen",
   "wordWrap",
+  "showWhitespace",
+  "ddlOpenMode",
   "vimModeEnabled",
+  "doubleClickStringSelectionMode",
   "autoCloseBrackets",
+  "restoreSqlFromSourcePasteEnabled",
   "sqlSemanticDiagnosticsMode",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
@@ -31,8 +46,16 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "savedSqlOpenTargetMode",
   "appLayout",
   "tabLayout",
+  "tabPlacement",
+  "colorizeConnectionTabs",
+  "tabGroupMode",
+  "tabSortMode",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
+  "showColumnHeaderTooltips",
+  "showResultSourceDatabase",
+  "resultTabNamingMode",
+  "resultTabPreferComments",
   "dataGridShowTransposeFieldMetadata",
   "colorizeDataGridCellTypes",
   "dataGridTypeColorSchemes",
@@ -41,16 +64,27 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
   "dataGridFilterEditorView",
+  "dataGridToolbarLayout",
+  "dataGridKeepFilterEditorExpanded",
   "dataGridTextFilterPanelHeight",
+  "defaultAutoKeepResults",
+  "multiStatementDefaultView",
   "dataGridAutoTransposeSingleRow",
+  "dataGridCellDetailButtonVisible",
+  "dataGridCrosshairHighlight",
   "pageSize",
   "tableOpenPageSize",
+  "tableOpenSortMode",
+  "tableDatabaseSortDirection",
+  "tableLocalSortDirection",
   "queryResultMaxRowsEnabled",
   "queryResultMaxRows",
+  "externalSqlEditorMaxMb",
   "infiniteScroll",
   "regexMaxMatchCount",
   "autoCalculateTotalRows",
   "flatteningMultiLineText",
+  "dataGridShowWhitespace",
   "tableColumnTemplateFields",
   "shortcuts",
   "sqlFormatter",
@@ -58,21 +92,41 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarObjectDisplay",
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
+  "sidebarSearchOpenedDatabasesOnly",
   "autoSelectActiveSidebarNode",
-  "sidebarOpenDatabaseOnSingleClick",
+  "sidebarBrowseObjectsOnDatabaseActivation",
   "openTabsRestoreMode",
   "disconnectTabHandlingMode",
+  "deleteConnectionTabHandlingMode",
+  "rememberConnectionDatabaseOnDelete",
   "dataTabReuseMode",
   "openDataTabsNextToActive",
   "prefillNewQueryWithSelect",
   "generateSqlIncludeDatabaseName",
+  "generateSqlQuoteIdentifiers",
+  "formatSqlOnSqlFileSave",
+  "showTableDdlHoverPreview",
+  "tableHoverLookupMode",
   "updateNotificationsEnabled",
+  "autoDownloadUpdates",
+  "autoUpdateApp",
+  "autoUpdateDrivers",
+  "autoUpdateJdbc",
+  "autoUpdateMcp",
+  "autoUpdatePlugins",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
+  "sidebarShowTooltips",
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarHiddenTablePrefixes",
+  "sidebarCopyTableNameSeparator",
+  "sidebarCopyTableNameIncludeSchema",
+  "redisKeyTemplates",
+  "redisDatabaseDisplayLimit",
   "exportBatchSize",
+  "csvQuoteMode",
+  "csvNullMode",
   "exportRowLimitEnabled",
   "exportRowLimit",
   "queryExportKeysetOptimizationEnabled",
@@ -82,11 +136,14 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "updateDownloadSource",
   "toolbarItems",
   "snippets",
+  "sqlShortcuts",
   "sqlVariableSubstitutionEnabled",
   "sqlVariableSyntaxOverrides",
   "continueOnErrorOnBatch",
   "clickTableNavigationTarget",
   "completionTriggerMode",
+  "defaultTransactionMode",
+  "keepExplicitTransactionInAutoCommit",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];
@@ -109,7 +166,13 @@ export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
+  if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
+  if (key === "tableCompletionSchemaQualification") return normalizeSqlTableCompletionSchemaQualification(value);
+  if (key === "tableHoverLookupMode") return normalizeTableHoverLookupMode(value);
+  if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
+  if (key === "csvNullMode") return normalizeCsvNullMode(value);
+  if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   return value;
 }
 
@@ -123,6 +186,20 @@ export function editorSettingsDraftFromSettings(settings: EditorSettings): Edito
     draft[key] = cloneDraftValue(normalizedDraftValue(key, settings[key])) as never;
   }
   return draft;
+}
+
+/**
+ * Draft-shaped, per-key-normalized values for exactly the keys present in
+ * `settings`. Used for partial updates (e.g. settings import) where keys the
+ * input does not contain must leave the target state untouched.
+ */
+export function editorSettingsDraftPatchFromSettings(settings: Partial<EditorSettings>): Partial<EditorSettingsDraft> {
+  const patch: Partial<EditorSettingsDraft> = {};
+  for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
+    if (!(key in settings)) continue;
+    (patch as Record<string, unknown>)[key] = cloneDraftValue(normalizedDraftValue(key, settings[key])) as never;
+  }
+  return patch;
 }
 
 export function editorSettingsPatchFromDraft(draft: EditorSettingsDraft, base: EditorSettingsDraft): Partial<EditorSettings> {

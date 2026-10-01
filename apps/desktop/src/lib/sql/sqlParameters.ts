@@ -25,7 +25,7 @@ export interface SqlBracedParameter extends SqlParameterDescriptor {
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
-  replacement?: "string-fragment" | "mybatis-foreach" | "mybatis-where";
+  replacement?: "string-fragment" | "quoted-string" | "mybatis-foreach" | "mybatis-where";
   foreach?: MyBatisForeach;
   where?: MyBatisWhere;
 }
@@ -55,6 +55,8 @@ type TriggerPseudoRecordName = "new" | "old" | "parent" | "eventinfo";
 
 export interface SqlParameterOptions {
   databaseType?: DatabaseType;
+  /** Database-level compatibility mode, for example openGauss A/B/C/PG. */
+  compatibilityMode?: string;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
   enabledSyntaxes?: readonly SqlParameterSyntax[];
 }
@@ -221,9 +223,16 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
       cursor = occurrence.end;
       continue;
     }
+    // An empty Raw SQL value means that this placeholder is intentionally left
+    // unresolved, rather than replaced with an empty string or NULL.
+    if (input.kind === "raw" && !input.value.trim()) {
+      result += occurrence.token;
+      cursor = occurrence.end;
+      continue;
+    }
     // Embedded placeholders stay inside the surrounding SQL string, so their value
     // must be escaped as text instead of being wrapped in a second SQL literal.
-    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
+    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : occurrence.replacement === "quoted-string" ? sqlParameterQuotedString(input) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
   result += sql.slice(cursor);
@@ -369,7 +378,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const occurrences: ParameterOccurrence[] = [];
   const databaseType = options?.databaseType;
   const nativeSqlServerParameters = collectNativeSqlServerParameters(sql, databaseType);
-  const supportsNamedParameters = databaseType !== "saphana";
+  const supportsNamedParameters = databaseType !== "saphana" && databaseType !== "neo4j" && databaseType !== "nebula";
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();
@@ -428,9 +437,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
 
     if (ch === "'" || ch === '"') {
-      // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
-      // in ordinary single-quoted values use escaped text replacement below.
-      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
+      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch, isSyntaxEnabled);
       if (quoted) {
         occurrences.push(quoted);
         i = quoted.end;
@@ -1273,6 +1280,13 @@ function collectNativeSqlServerParameters(sql: string, databaseType?: DatabaseTy
       i = collectSelectAssignmentVariables(sql, i + "select".length, declared, databaseType);
       continue;
     }
+    if (matchesWord(sql, i, "get")) {
+      const diagnosticsEnd = readGetDiagnosticsEnd(sql, i);
+      if (diagnosticsEnd !== null) {
+        i = collectSetStatementVariables(sql, diagnosticsEnd, declared, databaseType);
+        continue;
+      }
+    }
     if ((matchesWord(sql, i, "create") || matchesWord(sql, i, "alter")) && isRoutineDefinitionStart(sql, i)) {
       i = collectRoutineDefinitionVariables(sql, i, declared, databaseType);
       continue;
@@ -1369,12 +1383,13 @@ function collectSetStatementVariables(sql: string, start: number, declared: Set<
 
 function collectSelectAssignmentVariables(sql: string, start: number, declared: Set<string>, databaseType?: DatabaseType): number {
   let i = start;
+  let depth = 0;
   while (i < sql.length) {
     const ch = sql[i];
     const next = sql[i + 1];
-    if (ch === ";") return i + 1;
-    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
-    if (matchesWord(sql, i, "from")) return i;
+    if (ch === ";" && depth === 0) return i + 1;
+    if (depth === 0 && isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (databaseType !== "mysql" && matchesWord(sql, i, "from")) return i;
     if (ch === "'" || ch === '"' || ch === "`") {
       i = skipQuoted(sql, i, ch);
       continue;
@@ -1395,6 +1410,23 @@ function collectSelectAssignmentVariables(sql: string, start: number, declared: 
       i = skipLine(sql, i + 1);
       continue;
     }
+    if (databaseType === "mysql" && ch === "(") {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (databaseType === "mysql" && ch === ")") {
+      depth = Math.max(0, depth - 1);
+      i += 1;
+      continue;
+    }
+    if (databaseType === "mysql" && depth === 0 && matchesWord(sql, i, "into")) {
+      const targetEnd = collectMysqlSelectIntoTargets(sql, i + "into".length, declared);
+      if (targetEnd !== null) {
+        i = targetEnd;
+        continue;
+      }
+    }
     if (ch === "@") {
       const name = readParameterName(sql, i + 1);
       if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
@@ -1406,6 +1438,21 @@ function collectSelectAssignmentVariables(sql: string, start: number, declared: 
     i += 1;
   }
   return i;
+}
+
+function collectMysqlSelectIntoTargets(sql: string, start: number, declared: Set<string>): number | null {
+  let i = skipSqlWhitespaceAndComments(sql, start);
+  let found = false;
+  while (i < sql.length && sql[i] === "@" && sql[i + 1] !== "@" && sql[i - 1] !== "@") {
+    const name = readParameterName(sql, i + 1);
+    if (!name) break;
+    declared.add(name.toLowerCase());
+    found = true;
+    i = skipSqlWhitespaceAndComments(sql, i + 1 + name.length);
+    if (sql[i] !== ",") break;
+    i = skipSqlWhitespaceAndComments(sql, i + 1);
+  }
+  return found ? i : null;
 }
 
 function collectRoutineDefinitionVariables(sql: string, start: number, declared: Set<string>, databaseType?: DatabaseType): number {
@@ -1486,6 +1533,16 @@ function collectExecNamedArgumentStarts(sql: string, start: number, ignoredStart
     i += 1;
   }
   return i;
+}
+
+// MySQL's GET DIAGNOSTICS writes its results into the user variables on the left
+// of each assignment (`GET DIAGNOSTICS CONDITION 1 @err = MESSAGE_TEXT`), exactly
+// as SET and SELECT ... INTO do. Returns the offset just past the statement's
+// leading keywords, or null when `start` is an ordinary `get` identifier.
+function readGetDiagnosticsEnd(sql: string, start: number): number | null {
+  let keyword = readNextKeyword(sql, start + "get".length);
+  if (keyword?.word === "current" || keyword?.word === "stacked") keyword = readNextKeyword(sql, keyword.end);
+  return keyword?.word === "diagnostics" ? keyword.end : null;
 }
 
 function isRoutineDefinitionStart(sql: string, start: number): boolean {
@@ -1583,6 +1640,7 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
     name,
     syntax,
     token: sql.slice(start, end),
+    ...(quote === "\'" ? { replacement: "quoted-string" as const } : {}),
     start,
     end,
   };
@@ -1743,6 +1801,11 @@ function quoteSqlString(value: string): string {
 
 function sqlParameterStringFragment(input: SqlParameterInput): string {
   return input.value.replace(/'/g, "''");
+}
+
+function sqlParameterQuotedString(input: SqlParameterInput): string {
+  if (input.kind === "null" || ((input.kind === "number" || input.kind === "raw") && !input.value.trim())) return "NULL";
+  return quoteSqlString(input.value);
 }
 
 function normalizeBooleanLiteral(value: string): string {

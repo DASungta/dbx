@@ -64,6 +64,16 @@ pub async fn list_database_storage(
     Ok(Json(result))
 }
 
+pub async fn list_xugu_tablespaces(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::db::XuguTablespaceInfo>>, AppError> {
+    let result = dbx_core::schema::list_xugu_tablespaces_core(&state.app, &q.connection_id, q.database.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn get_sqlserver_completion_context(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -168,6 +178,18 @@ pub async fn get_sqlserver_column_metadata(
             .await
             .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn get_mysql_table_auto_increment(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Option<String>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    let result = dbx_core::schema::get_mysql_table_auto_increment_core(&state.app, &q.connection_id, database, table)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn list_schemas(
@@ -380,25 +402,8 @@ pub async fn get_custom_type_details(
     Ok(Json(result))
 }
 
-const OBJECT_METADATA_CACHE_PREFIX: &str = "object-meta:v1";
-
-fn metadata_cache_segment(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' => {
-                encoded.push(byte as char)
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(HEX[(byte >> 4) as usize] as char);
-                encoded.push(HEX[(byte & 0x0f) as usize] as char);
-            }
-        }
-    }
-    encoded
-}
+pub(crate) use dbx_core::object_cache::object_metadata_cache_prefix;
+use dbx_core::object_cache::{metadata_cache_segment, OBJECT_METADATA_CACHE_PREFIX};
 
 fn metadata_cache_key(
     connection_id: &str,
@@ -455,6 +460,15 @@ where
 
 fn should_cache_columns(client_session_id: Option<&str>) -> bool {
     client_session_id.is_none()
+}
+
+pub async fn get_plugin_table_metadata(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::schema::plugin_metadata::PluginTableContext>,
+) -> Result<Json<dbx_core::schema::plugin_metadata::PluginTableMetadata>, AppError> {
+    let result =
+        dbx_core::schema::plugin_metadata::get_table_metadata(&state.app, request).await.map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn list_columns(
@@ -581,6 +595,26 @@ pub async fn list_reference_key_columns(
     Ok(Json(dbx_core::schema::reference_key_columns_from_indexes(&indexes)))
 }
 
+pub async fn list_reference_keys(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::schema::ReferenceKeyInfo>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    let catalog = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await;
+    let indexes = if let Some(catalog) = catalog.as_deref() {
+        dbx_core::schema::list_doris_catalog_indexes_core(&state.app, &q.connection_id, catalog, database, table)
+            .await
+            .map_err(AppError::from)?
+    } else {
+        dbx_core::schema::list_indexes_core(&state.app, &q.connection_id, database, schema, table)
+            .await
+            .map_err(AppError::from)?
+    };
+    Ok(Json(dbx_core::schema::reference_keys_from_indexes(&indexes)))
+}
+
 pub async fn list_foreign_keys(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -645,6 +679,7 @@ pub async fn list_constraints(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
+    let _ = q.catalog.as_deref();
     let result = dbx_core::schema::list_constraints_core(&state.app, &q.connection_id, database, schema, table)
         .await
         .map_err(AppError::from)?;
@@ -672,6 +707,19 @@ pub async fn get_table_partition_status(
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
     dbx_core::schema::table_partition_status_core(&state.app, &q.connection_id, database, schema, table)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+pub async fn get_table_partitioning(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::PgTablePartitioning>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    dbx_core::schema::get_table_partitioning_core(&state.app, &q.connection_id, database, schema, table)
         .await
         .map(Json)
         .map_err(AppError::from)
@@ -841,6 +889,17 @@ pub async fn list_available_extensions(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn list_event_triggers(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let result = dbx_core::schema::list_event_triggers_core(&state.app, &q.connection_id, database)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,6 +913,15 @@ mod tests {
             "object-meta:v1:conn%3A1:db%25%20name:sch%2Fema:%E8%A1%A8%3A%E5%90%8D:ice%3Aberg:backend-columns:"
         );
         assert!(key.starts_with("object-meta:v1:conn%3A1:db%25%20name:sch%2Fema:%E8%A1%A8%3A%E5%90%8D:"));
+    }
+
+    #[test]
+    fn database_metadata_cache_prefix_covers_backend_object_facets() {
+        let prefix = object_metadata_cache_prefix("conn:1", "db% name");
+        let key = metadata_cache_key("conn:1", "db% name", "public", "users", None, "backend-columns");
+
+        assert_eq!(prefix, "object-meta:v1:conn%3A1:db%25%20name:");
+        assert!(key.starts_with(&prefix));
     }
 
     #[test]

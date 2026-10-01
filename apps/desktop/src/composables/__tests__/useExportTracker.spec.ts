@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TransferProgress, TransferRequest } from "@/lib/backend/api";
+import type { SqlFileProgress, TransferProgress, TransferRequest } from "@/lib/backend/api";
 
 vi.mock("@/lib/backend/api", () => ({
   startTransfer: vi.fn(),
@@ -10,7 +10,17 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 import * as api from "@/lib/backend/api";
-import { formatDataTransferDuration, MAX_TRANSFER_FAILURE_DETAIL_BYTES, MAX_TRANSFER_FAILURE_DETAILS, MAX_TRANSFER_FAILURE_ERROR_BYTES, useExportTracker } from "@/composables/useExportTracker";
+import {
+  formatDataTransferDuration,
+  MAX_SQL_FILE_FAILURE_DETAIL_BYTES,
+  MAX_SQL_FILE_FAILURE_DETAILS,
+  MAX_SQL_FILE_FAILURE_ERROR_BYTES,
+  MAX_SQL_FILE_FAILURE_SUMMARY_BYTES,
+  MAX_TRANSFER_FAILURE_DETAIL_BYTES,
+  MAX_TRANSFER_FAILURE_DETAILS,
+  MAX_TRANSFER_FAILURE_ERROR_BYTES,
+  useExportTracker,
+} from "@/composables/useExportTracker";
 
 let now = 0;
 
@@ -25,9 +35,14 @@ function transferRequest(transferId: string, tables = ["users"]): TransferReques
     targetSchema: "public",
     tables,
     createTable: true,
+    content: "structureAndData",
+    objects: [],
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
+    dropTargetBeforeCreate: false,
+    dropTargetConfirmed: false,
   };
 }
 
@@ -42,6 +57,21 @@ function transferProgress(transferId: string, status: TransferProgress["status"]
     status,
     error: status === "error" ? "transfer failed" : null,
     terminal,
+  };
+}
+
+function sqlFileProgress(executionId: string, statementIndex: number, overrides: Partial<SqlFileProgress> = {}): SqlFileProgress {
+  return {
+    executionId,
+    status: "statementFailed",
+    statementIndex,
+    successCount: 0,
+    failureCount: statementIndex,
+    affectedRows: 0,
+    elapsedMs: statementIndex,
+    statementSummary: `SELECT missing_${statementIndex}`,
+    error: `failure ${statementIndex}`,
+    ...overrides,
   };
 }
 
@@ -112,14 +142,47 @@ describe("data transfer task duration", () => {
   it("records an immediate start failure as a terminal duration", async () => {
     vi.mocked(api.startTransfer).mockRejectedValueOnce(new Error("start failed"));
     const tracker = useExportTracker();
+    const onStarted = vi.fn();
     now = 10_000;
-    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users");
+    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users", { onStarted });
     now = 10_025;
 
     await vi.waitFor(() => expect(task.status).toBe("Error"));
 
+    expect(onStarted).not.toHaveBeenCalled();
     expect(task.finishedAt! - task.startedAt!).toBe(25);
     expect(task.errorMessage).toBe("start failed");
+  });
+
+  it.each([
+    ["append", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: false }],
+    ["rebuild", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: true }],
+    ["data-only", { content: "dataOnly", mode: "append", createTable: false, dropTargetBeforeCreate: false }],
+  ] as const)("launches one %s task and acknowledges its accepted submission once", async (_flow, overrides) => {
+    let finishTransfer!: () => void;
+    vi.mocked(api.startTransfer).mockImplementationOnce((_request, _onProgress, onStarted) => {
+      onStarted?.();
+      onStarted?.();
+      return new Promise<void>((resolve) => {
+        finishTransfer = resolve;
+      });
+    });
+    const tracker = useExportTracker();
+    const onStarted = vi.fn();
+    const onOpen = vi.fn();
+    const request = { ...transferRequest(`start-${_flow}`), ...overrides };
+
+    const task = tracker.startDataTransferTask(request, _flow, { onStarted, onOpen });
+
+    expect(task.status).toBe("Running");
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.startTransfer).mock.calls[0]?.[0]).toMatchObject(overrides);
+    expect(onStarted).toHaveBeenCalledTimes(1);
+    task.onOpen?.();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    finishTransfer();
+    await Promise.resolve();
   });
 
   it("freezes an overlapping transfer failure without starting another request", async () => {
@@ -129,11 +192,13 @@ describe("data transfer task duration", () => {
     now = 100;
     tracker.startDataTransferTask(transferRequest("active"), "active");
     now = 130;
-    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap");
+    const onStarted = vi.fn();
+    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap", { onStarted });
 
     expect(overlapping.status).toBe("Error");
     expect(overlapping.finishedAt! - overlapping.startedAt!).toBe(0);
     expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(onStarted).not.toHaveBeenCalled();
 
     resolveFirst();
     await Promise.resolve();
@@ -326,6 +391,85 @@ describe("data transfer failure details", () => {
     });
 
     expect(task.transferFailuresOmitted).toBe(4_096);
+  });
+});
+
+describe("SQL-file failure details", () => {
+  it("preserves failures in event order through terminal completion and updates duplicate statements", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-failures", "migration.sql", "/tmp/migration.sql");
+
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 3));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 7));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 3, { error: "updated failure 3" }));
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 8, { status: "done", successCount: 5, failureCount: 2, error: null }));
+
+    expect(task.status).toBe("Done");
+    expect(task.sqlFileFailures).toEqual([
+      { statementIndex: 3, statementSummary: "SELECT missing_3", error: "updated failure 3" },
+      { statementIndex: 7, statementSummary: "SELECT missing_7", error: "failure 7" },
+    ]);
+    expect(task.failureCount).toBe(2);
+  });
+
+  it("retains reliable multi-file context for equal per-file statement indexes", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("multi-file-failures", "first.sql (+1)", "/tmp/first.sql; /tmp/second.sql");
+
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 1), { fileIndex: 0, fileName: "first.sql" });
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, 1), { fileIndex: 1, fileName: "second.sql" });
+
+    expect(task.sqlFileFailures).toEqual([
+      { statementIndex: 1, statementSummary: "SELECT missing_1", error: "failure 1", fileIndex: 0, fileName: "first.sql" },
+      { statementIndex: 1, statementSummary: "SELECT missing_1", error: "failure 1", fileIndex: 1, fileName: "second.sql" },
+    ]);
+  });
+
+  it("bounds retained count and reports omitted failures without double-counting replays", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("many-sql-failures", "migration.sql", "/tmp/migration.sql");
+
+    for (let index = 1; index <= MAX_SQL_FILE_FAILURE_DETAILS + 2; index += 1) {
+      tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, index));
+    }
+    tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, MAX_SQL_FILE_FAILURE_DETAILS + 1));
+
+    expect(task.sqlFileFailures).toHaveLength(MAX_SQL_FILE_FAILURE_DETAILS);
+    expect(task.sqlFileFailuresOmitted).toBe(2);
+  });
+
+  it("bounds UTF-8 summaries, errors, and total retained bytes", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("long-sql-failures", "migration.sql", "/tmp/migration.sql");
+    const longText = "错误🙂".repeat(4_000);
+
+    for (let index = 1; index <= 300; index += 1) {
+      tracker.updateSqlFileTask(task.exportId, sqlFileProgress(task.exportId, index, { statementSummary: longText, error: longText }));
+    }
+
+    const encoder = new TextEncoder();
+    const retainedBytes = task.sqlFileFailures!.reduce((total, failure) => {
+      expect(encoder.encode(failure.statementSummary).length).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_SUMMARY_BYTES);
+      expect(encoder.encode(failure.error).length).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_ERROR_BYTES);
+      expect(failure.statementSummary.endsWith("\ud83d")).toBe(false);
+      expect(failure.error.endsWith("\ud83d")).toBe(false);
+      expect(failure.truncated).toBe(true);
+      return total + encoder.encode(failure.statementSummary).length + encoder.encode(failure.error).length + encoder.encode(failure.fileName ?? "").length;
+    }, 0);
+
+    expect(retainedBytes).toBeLessThanOrEqual(MAX_SQL_FILE_FAILURE_DETAIL_BYTES);
+    expect(task.sqlFileFailuresOmitted).toBeGreaterThan(0);
+  });
+
+  it("starts a replacement execution with an empty failure list", () => {
+    const tracker = useExportTracker();
+    const first = tracker.addSqlFileTask("reused-id", "first.sql", "/tmp/first.sql");
+    tracker.updateSqlFileTask(first.exportId, sqlFileProgress(first.exportId, 1));
+
+    const replacement = tracker.addSqlFileTask("reused-id", "second.sql", "/tmp/second.sql");
+
+    expect(replacement.sqlFileFailures).toEqual([]);
+    expect(replacement.sqlFileFailuresOmitted).toBe(0);
   });
 });
 

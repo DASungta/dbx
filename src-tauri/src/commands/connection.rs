@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
 pub use dbx_core::agent_connection::{
     agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver, oracle_alternate_connect_config,
@@ -16,8 +16,8 @@ use dbx_core::database_capabilities;
 use dbx_core::db;
 use dbx_core::db::agent_driver::{AgentDriverClient, AgentMethod};
 use dbx_core::models::connection::{
-    database_info_from_protocol_value, rewrite_jdbc_url_host, ConnectionConfig, ConnectionTestResult,
-    DatabaseConnectionInfo, DatabaseType,
+    database_info_from_protocol_value, rewrite_jdbc_url_host, ConnectionConfig, ConnectionLivenessMessage,
+    ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
 };
 pub use dbx_core::path_utils::expand_tilde;
 use dbx_core::runtime_config::{release_runtime_config_on_disconnect, should_retain_runtime_config};
@@ -111,14 +111,18 @@ async fn test_agent_connection(
     port: u16,
 ) -> Result<ConnectionTestResult, String> {
     let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?;
+    // Oracle OCI connections carry process-scoped client settings (`NLS_LANG`,
+    // Instant Client loader path): they have to reach the agent process itself.
+    let agent_env = state.agent_launch_env(config).await;
     let result = state
         .agent_manager
-        .call_daemon_method_with_timeout::<serde_json::Value>(
+        .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
             &config.db_type,
             config.driver_profile.as_deref(),
             AgentMethod::TestConnection,
             connect_params,
             Some(agent_connect_timeout(config)),
+            &agent_env,
         )
         .await;
 
@@ -126,9 +130,10 @@ async fn test_agent_connection(
         Ok(response) => response,
         Err(err) => {
             if let Some(alternate_config) = oracle_alternate_connect_config(config, &err) {
+                let alternate_env = state.agent_launch_env(&alternate_config).await;
                 state
                     .agent_manager
-                    .call_daemon_method_with_timeout::<serde_json::Value>(
+                    .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
                         &alternate_config.db_type,
                         alternate_config.driver_profile.as_deref(),
                         AgentMethod::TestConnection,
@@ -139,6 +144,7 @@ async fn test_agent_connection(
                             alternate_config.database.as_deref().unwrap_or(""),
                         )?,
                         Some(agent_connect_timeout(&alternate_config)),
+                        &alternate_env,
                     )
                     .await
                     .map_err(|alternate_err| {
@@ -174,7 +180,9 @@ async fn connect_agent_pool(
     port: u16,
 ) -> Result<PoolKind, String> {
     let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?;
-    let mut client = state.agent_manager.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
+    let agent_env = state.agent_launch_env(config).await;
+    let mut client =
+        state.agent_manager.spawn_with_env(&config.db_type, config.driver_profile.as_deref(), &agent_env).await?;
     let connect_result = client
         .call_method_with_timeout::<serde_json::Value>(
             AgentMethod::Connect,
@@ -220,10 +228,11 @@ mod tests {
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
-    use dbx_core::storage::Storage;
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "mongo".to_string(),
             name: "MongoDB".to_string(),
@@ -240,8 +249,10 @@ mod tests {
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -269,10 +280,16 @@ mod tests {
             redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -379,14 +396,35 @@ mod tests {
             Ok(_) => panic!("SQLCipher attachments must be rejected"),
             Err(error) => error,
         };
-        assert!(error.contains("SQLCipher"), "{error}");
+        assert!(error.contains("encrypted connections"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn sqlite_ssh_config_does_not_open_the_remote_path_as_a_local_file() {
+        let mut config = sqlite_config(std::path::Path::new("/remote/data/app.db"), "");
+        config.transport_layers = serde_json::from_value(serde_json::json!([{
+            "type": "ssh",
+            "id": "hop-1",
+            "enabled": true,
+            "host": "203.0.113.10",
+            "port": 22,
+            "user": "testuser"
+        }]))
+        .expect("ssh layer");
+
+        let error = match connect_sqlite_from_config(&config).await {
+            Ok(_) => panic!("SSH SQLite must not open a remote path on the local filesystem"),
+            Err(error) => error,
+        };
+        assert!(error.contains("SSH") || error.contains("Desktop") || error.contains("worker"), "{error}");
+        assert!(!error.contains("File does not exist"), "{error}");
     }
 
     #[tokio::test]
     async fn saving_memory_sqlite_attachments_keeps_the_live_pool_intact() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-sqlite-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = sqlite_config(std::path::Path::new(":memory:"), "");
         let pool = dbx_core::db::sqlite::connect_path(":memory:").await.unwrap();
@@ -397,17 +435,21 @@ mod tests {
         .await
         .unwrap();
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
-        state.connections.write().await.insert(initial.id.clone(), PoolKind::Sqlite(pool.clone()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(initial.id.clone(), PoolKind::Sqlite(pool.clone()));
+            })
+            .await;
 
         let mut invalid = initial.clone();
         invalid.attached_databases.push(AttachedDatabaseConfig {
             name: "analytics".to_string(),
             path: dir.join("analytics.sqlite").to_string_lossy().to_string(),
         });
-        let error = save_connection_configs(&state, &[invalid]).await.unwrap_err();
+        let error = save_connection_configs(&state, &[invalid], Vec::new()).await.unwrap_err();
 
         assert!(error.contains("in-memory main database"), "{error}");
-        assert!(state.connections.read().await.contains_key(&initial.id));
+        assert!(state.pool_handle(&initial.id).await.is_some());
         assert_eq!(state.configs.read().await.get(&initial.id), Some(&initial));
         let retained = dbx_core::db::sqlite::execute_query(&pool, "SELECT value FROM retained;").await.unwrap();
         assert_eq!(retained.rows[0][0], serde_json::json!("yes"));
@@ -546,7 +588,7 @@ mod tests {
     async fn persist_mongo_legacy_driver_profile_updates_only_the_target_connection() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-mongo-profile-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let mongo = mongodb_config();
         let mut other = mongodb_config();
@@ -565,7 +607,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(feature = "sqlite-sqlcipher")]
+    #[cfg(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers"))]
     #[tokio::test]
     async fn sqlite_connect_from_config_uses_sqlcipher_key() {
         let path = std::env::temp_dir().join(format!("dbx-tauri-sqlcipher-{}.db", uuid::Uuid::new_v4()));
@@ -599,7 +641,7 @@ mod tests {
             Ok(_) => panic!("wrong SQLCipher key must fail"),
             Err(err) => err,
         };
-        assert!(wrong_key.contains("SQLCipher database unlock failed"));
+        assert!(wrong_key.contains("Encrypted SQLite database unlock failed"));
 
         let missing_key = match connect_sqlite_from_config(&sqlite_config(&path, "")).await {
             Ok(_) => panic!("missing SQLCipher key must fail"),
@@ -615,15 +657,19 @@ mod tests {
     async fn save_connection_configs_updates_runtime_cache_and_drops_mq_adapter() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
-        state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(initial.id.clone(), PoolKind::MessageQueue);
+            })
+            .await;
         let first = state.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        save_connection_configs(&state, std::slice::from_ref(&updated)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&updated), Vec::new()).await.unwrap();
 
         let cached_admin_url = state
             .configs
@@ -638,7 +684,7 @@ mod tests {
 
         let second = state.mq_registry.get_or_build(&updated).await.unwrap().adapter;
         assert!(!std::sync::Arc::ptr_eq(&first, &second));
-        assert!(!state.connections.read().await.contains_key(&initial.id));
+        assert!(state.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -648,13 +694,17 @@ mod tests {
     async fn load_connection_configs_syncs_runtime_cache_and_drops_stale_pool() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
         state.storage.save_connections(std::slice::from_ref(&updated)).await.unwrap();
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
-        state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(initial.id.clone(), PoolKind::MessageQueue);
+            })
+            .await;
 
         let loaded = load_connection_configs(&state).await.unwrap();
 
@@ -669,7 +719,7 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
         assert_eq!(cached_admin_url.as_deref(), Some("http://127.0.0.1:8081"));
-        assert!(!state.connections.read().await.contains_key(&initial.id));
+        assert!(state.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -679,7 +729,7 @@ mod tests {
     async fn save_connection_configs_removes_deleted_runtime_config_and_mq_adapter() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let kept = mongodb_config();
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
@@ -690,7 +740,7 @@ mod tests {
         }
         let stale = state.mq_registry.get_or_build(&removed).await.unwrap().adapter;
 
-        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept), Vec::new()).await.unwrap();
 
         let configs = state.configs.read().await;
         assert!(configs.contains_key(&kept.id));
@@ -726,7 +776,7 @@ mod tests {
     async fn save_connection_configs_retains_one_time_runtime_config_and_its_pool() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let persisted = mongodb_config();
         let preview = duckdb_preview_config();
@@ -751,14 +801,14 @@ mod tests {
     async fn save_connection_configs_keeps_session_credential_of_one_time_config() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let persisted = mongodb_config();
         let preview = duckdb_preview_config();
         state.configs.write().await.insert(preview.id.clone(), preview.clone());
         state.session_credentials.set("", &preview.id, "secret").expect("session credential fixture");
 
-        save_connection_configs(&state, std::slice::from_ref(&persisted)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&persisted), Vec::new()).await.unwrap();
 
         // If the config is retained the credential must be retained with it, or the
         // next query re-prompts for a password that was already entered.
@@ -772,7 +822,7 @@ mod tests {
     async fn save_connection_configs_removes_deleted_connection_pools() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let kept = mongodb_config();
         let removed = mq_config("removed-mq", "http://127.0.0.1:8080");
@@ -781,11 +831,15 @@ mod tests {
             configs.insert(kept.id.clone(), kept.clone());
             configs.insert(removed.id.clone(), removed.clone());
         }
-        state.connections.write().await.insert(removed.id.clone(), PoolKind::MessageQueue);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(removed.id.clone(), PoolKind::MessageQueue);
+            })
+            .await;
 
-        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept), Vec::new()).await.unwrap();
 
-        assert!(!state.connections.read().await.contains_key(&removed.id));
+        assert!(state.pool_handle(&removed.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -794,7 +848,7 @@ mod tests {
     async fn sync_connection_configs_ignores_password_only_changes() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-conn-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
 
         let mut initial = mongodb_config();
@@ -827,7 +881,7 @@ mod tests {
     async fn sync_connection_configs_preserves_nacos_session_password_for_scope_updates() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-nacos-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = nacos_config("nacos-a");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
@@ -860,14 +914,22 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn save_connections(state: State<'_, Arc<AppState>>, configs: Vec<ConnectionConfig>) -> Result<(), String> {
+pub async fn save_connections(
+    state: State<'_, Arc<AppState>>,
+    configs: Vec<ConnectionConfig>,
+    removed_ids: Option<Vec<String>>,
+) -> Result<(), String> {
     let configs: Vec<ConnectionConfig> = configs.into_iter().map(|config| config.canonicalized()).collect();
-    save_connection_configs(state.inner(), &configs).await
+    save_connection_configs(state.inner(), &configs, removed_ids.unwrap_or_default()).await
 }
 
-async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> Result<(), String> {
+async fn save_connection_configs(
+    state: &AppState,
+    configs: &[ConnectionConfig],
+    removed_ids: Vec<String>,
+) -> Result<(), String> {
     for config in configs {
-        if config.db_type == DatabaseType::Sqlite {
+        if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(config) {
             db::sqlite::validate_persistent_attachments(
                 &config.host,
                 &config.password,
@@ -875,8 +937,15 @@ async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             )?;
         }
     }
+    if !removed_ids.is_empty() {
+        state.storage.delete_connections(&removed_ids).await?;
+    }
     state.storage.save_connections(configs).await?;
-    let sync = sync_connection_configs(state, configs).await;
+    // Saving upserts, so the request only covers this window's connections. Sync
+    // against the whole persisted list to keep connections saved by another
+    // window/process alive in the runtime cache as well.
+    let persisted = state.storage.load_connections().await?;
+    let sync = sync_connection_configs(state, &persisted).await;
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(state, &sync.mq_adapter_ids_to_drop).await;
@@ -991,6 +1060,28 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+#[tauri::command]
+pub async fn save_table_vgroups(
+    state: State<'_, Arc<AppState>>,
+    scope_key: String,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_table_vgroups(&scope_key, &layout).await
+}
+
+#[tauri::command]
+pub async fn load_table_vgroups(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    state.storage.load_table_vgroups().await
+}
+
+#[tauri::command]
+pub async fn delete_table_vgroups_for_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<(), String> {
+    state.storage.delete_table_vgroups_for_connection(&connection_id).await
+}
+
 fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
     db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
         .into_iter()
@@ -1001,7 +1092,36 @@ fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqli
         .collect()
 }
 
+// Thin wrapper for the test suite below: production callers all go through
+// `connect_sqlite_from_config_with_state` with a real AppState.
+#[cfg(test)]
 async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sqlite::SqliteHandle, String> {
+    connect_sqlite_from_config_with_state(None, config.id.as_str(), config).await
+}
+
+async fn connect_sqlite_from_config_with_state(
+    state: Option<&AppState>,
+    connection_id: &str,
+    config: &ConnectionConfig,
+) -> Result<db::sqlite::SqliteHandle, String> {
+    if db::sqlite_worker::sqlite_remote_worker_requested(config) {
+        let state =
+            state.ok_or_else(|| "Remote SQLite over SSH is only available in the DBX Desktop app".to_string())?;
+        let transport_layers = state.resolved_transport_layers(config).await?;
+        let worker = db::sqlite_worker::connect_sqlite_worker(
+            &state.tunnels,
+            &state.proxy_tunnels,
+            &state.http_tunnels,
+            &state.agent_manager,
+            state.storage.data_dir(),
+            connection_id,
+            config,
+            &transport_layers,
+        )
+        .await?;
+        return Ok(db::sqlite::SqliteHandle::from_worker(worker));
+    }
+
     let sqlite_path = expand_tilde(&config.host);
     db::sqlite::validate_persistent_attachments(&sqlite_path, &config.password, !config.attached_databases.is_empty())?;
     let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
@@ -1023,17 +1143,30 @@ async fn test_redis_connection(
     host: &str,
     port: u16,
     connect_timeout: std::time::Duration,
-) -> Result<String, String> {
+) -> Result<Option<DatabaseConnectionInfo>, String> {
     // Connection tests must exercise the same Redis lifecycle as a saved connection,
     // including compatibility auth, TLS, and database selection.
     if config.uses_redis_cluster() {
-        drop(state.connect_redis_cluster(tunnel_id, config).await?);
-    } else if config.uses_redis_sentinel() {
-        drop(state.connect_redis_sentinel(tunnel_id, config).await?);
-    } else {
-        drop(db::redis_driver::connect_standalone(config, host, port, connect_timeout).await?);
+        let connection =
+            db::redis_driver::RedisConnection::Cluster(state.connect_redis_cluster(tunnel_id, config).await?);
+        let info = db::redis_driver::database_connection_info(&connection).await.ok();
+        drop(connection);
+        return Ok(info);
     }
-    Ok("Connection successful".to_string())
+    if config.uses_redis_sentinel() {
+        let connection = db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+            state.connect_redis_sentinel(tunnel_id, config).await?,
+        ));
+        let info = db::redis_driver::database_connection_info(&connection).await.ok();
+        drop(connection);
+        return Ok(info);
+    }
+    let connection = db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+        db::redis_driver::connect_standalone(config, host, port, connect_timeout).await?,
+    ));
+    let info = db::redis_driver::database_connection_info(&connection).await.ok();
+    drop(connection);
+    Ok(info)
 }
 
 #[tauri::command]
@@ -1049,6 +1182,11 @@ pub async fn test_connection_with_info(
     test_connection_with_info_inner(state.inner(), config).await
 }
 
+#[tauri::command]
+pub async fn test_ssh_tunnel(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
+    state.test_connection_ssh_tunnel(&config.canonicalized()).await
+}
+
 async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,
@@ -1057,14 +1195,26 @@ async fn test_connection_with_info_inner(
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
-    let (host, port) = state.connection_host_port(connection_id, &config).await?;
-    let probe_result = probe_connection_endpoint(&config, &host, port).await;
+    let endpoint = state.plugin_connection_endpoint(connection_id, &config).await?;
+    let (host, port) = (endpoint.host.clone(), endpoint.port);
+    let runtime_proxy = endpoint.proxy;
+    // SOCKS-routed plugin tests dial through the route themselves; probing the
+    // logical endpoint (possibly empty host/port) would mislead.
+    let probe_result =
+        if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
     let url = connection_url_for_endpoint(&config, &host, port);
     let target = redacted_connection_url_for_endpoint(&config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
     let idle_timeout = std::time::Duration::from_secs(config.idle_timeout_secs);
     let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
+    if config.db_type == DatabaseType::Plugin {
+        let result = state.plugin_host.test_connection(&config, &host, port, runtime_proxy).await;
+        if has_transport_layers {
+            state.reset_connection_transport_for_config(&tunnel_id, &config).await;
+        }
+        return result;
+    }
     let mut database_info = None;
     let result = match probe_result {
         Err(e) => Err(e),
@@ -1165,14 +1315,25 @@ async fn test_connection_with_info_inner(
                 }
                 Err(e) => Err(e),
             },
-            DatabaseType::Sqlite => match connect_sqlite_from_config(&config).await {
-                Ok(_) => Ok("Connection successful".to_string()),
-                Err(e) => Err(e),
-            },
+            DatabaseType::Sqlite => {
+                match connect_sqlite_from_config_with_state(Some(state.as_ref()), connection_id, &config).await {
+                    Ok(pool) => {
+                        pool.shutdown().await;
+                        Ok("Connection successful".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             DatabaseType::Redis => {
                 // Keep the result inside the outer lifecycle so temporary transports
                 // are reset after both successful and failed Redis tests.
-                test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await
+                match test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await {
+                    Ok(info) => {
+                        database_info = info;
+                        Ok("Connection successful".to_string())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             #[cfg(feature = "duckdb-sidecar")]
             DatabaseType::DuckDb => {
@@ -1190,8 +1351,19 @@ async fn test_connection_with_info_inner(
                         .connect(mongo_legacy_connect_params(&config, &host, port)?)
                         .await
                         .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
+                    let version = client
+                        .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
+                        .await
+                        .ok();
                     client.disconnect().await.ok();
-                    return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)"));
+                    return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)")
+                        .with_database_info(version.map(|product_version| DatabaseConnectionInfo {
+                            product_name: Some("MongoDB".to_string()),
+                            product_version: Some(product_version),
+                            current_database: config.effective_database().map(str::to_string),
+                            driver_name: Some("MongoDB legacy Agent".to_string()),
+                            ..Default::default()
+                        })));
                 }
 
                 let native_err = match db::mongo_driver::connect_with_oidc(
@@ -1211,7 +1383,15 @@ async fn test_connection_with_info_inner(
                         )
                         .await
                         {
-                            Ok(()) => return Ok(ConnectionTestResult::success("Connection successful")),
+                            Ok(()) => {
+                                let info =
+                                    db::mongo_driver::database_connection_info(&client, config.effective_database())
+                                        .await
+                                        .ok();
+                                return Ok(
+                                    ConnectionTestResult::success("Connection successful").with_database_info(info)
+                                );
+                            }
                             Err(e) => e,
                         }
                     }
@@ -1227,7 +1407,18 @@ async fn test_connection_with_info_inner(
                             &mongo_legacy_error_with_auth_hint(&err),
                         )
                     })?;
+                    let version = client
+                        .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
+                        .await
+                        .ok();
                     client.disconnect().await.ok();
+                    database_info = version.map(|product_version| DatabaseConnectionInfo {
+                        product_name: Some("MongoDB".to_string()),
+                        product_version: Some(product_version),
+                        current_database: config.effective_database().map(str::to_string),
+                        driver_name: Some("MongoDB legacy Agent".to_string()),
+                        ..Default::default()
+                    });
                     Ok("Connection successful (via legacy driver)".to_string())
                 } else {
                     Err(native_err)
@@ -1272,8 +1463,22 @@ async fn test_connection_with_info_inner(
                     config.url_params.as_deref(),
                     config.external_config.as_ref(),
                     connect_timeout,
-                );
+                    Some(config.ca_cert_path.as_str()),
+                    Some(config.client_cert_path.as_str()),
+                    Some(config.client_key_path.as_str()),
+                )?;
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
+            DatabaseType::Salesforce => {
+                let client = db::salesforce_driver::SfClient::from_config(
+                    &url,
+                    Some(&config.password),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                )?;
+                db::salesforce_driver::SfClient::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
             }
@@ -1286,8 +1491,28 @@ async fn test_connection_with_info_inner(
                     config.url_params.as_deref(),
                     config.external_config.as_ref(),
                     connect_timeout,
-                );
+                    Some(config.ca_cert_path.as_str()),
+                    Some(config.client_cert_path.as_str()),
+                    Some(config.client_key_path.as_str()),
+                )?;
                 db::easysearch_driver::test_connection(&mut client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
+            DatabaseType::Solr => {
+                let mut client = db::solr_driver::SolrClient::from_config(
+                    &url,
+                    Some(&config.username),
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(config.ca_cert_path.as_str()),
+                    Some(config.client_cert_path.as_str()),
+                    Some(config.client_key_path.as_str()),
+                )?;
+                db::solr_driver::test_connection(&mut client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
             }
@@ -1300,9 +1525,9 @@ async fn test_connection_with_info_inner(
                     config.external_config.as_ref(),
                     connect_timeout,
                 )?;
-                db::meilisearch_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
+                db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+                database_info = db::meilisearch_driver::database_connection_info(&client).await.ok();
+                Ok("Connection successful".to_string())
             }
             DatabaseType::Hbase => {
                 let client = db::hbase_driver::HBaseClient::new(
@@ -1312,9 +1537,9 @@ async fn test_connection_with_info_inner(
                     false,
                     connect_timeout,
                 )?;
-                db::hbase_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
+                db::hbase_driver::test_connection(&client, connect_timeout).await?;
+                database_info = db::hbase_driver::database_connection_info(&client).await.ok().flatten();
+                Ok("Connection successful".to_string())
             }
             DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
                 let kind = match config.db_type {
@@ -1384,17 +1609,25 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::InfluxDb3 => {
+                let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &config, connect_timeout)?;
+                db::influxdb3_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::VictoriaMetrics => {
                 let client =
                     db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &config, connect_timeout)?;
-                db::victoriametrics_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
+                db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+                database_info =
+                    db::victoriametrics_driver::database_connection_info(&client, connect_timeout).await.ok();
+                Ok("Connection successful".to_string())
             }
             DatabaseType::Nacos => {
                 let admin_config = state.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
-                adapter.test_connection_with_scope_validation().await?;
+                let info = adapter.test_connection_with_scope_validation().await?;
+                database_info = dbx_core::nacos::service::database_info_from_connection(&info);
                 Ok("Connection successful".to_string())
             }
             DatabaseType::Consul => {
@@ -1412,6 +1645,13 @@ async fn test_connection_with_info_inner(
                 } else {
                     client.agent_self().await.ok()
                 };
+                database_info = identity.as_ref().map(|identity| DatabaseConnectionInfo {
+                    product_name: Some("Consul".to_string()),
+                    product_version: identity.version.clone(),
+                    server_comment: Some(format!("Agent {}", identity.node)),
+                    driver_name: Some("Consul HTTP API".to_string()),
+                    ..Default::default()
+                });
                 Ok(identity
                     .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
                     .unwrap_or_else(|| {
@@ -1425,7 +1665,21 @@ async fn test_connection_with_info_inner(
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
                 let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
-                adapter.test_connection().await?;
+                let info = adapter.test_connection().await?;
+                database_info = Some(DatabaseConnectionInfo {
+                    product_name: Some(
+                        match info.system_kind {
+                            dbx_core::mq::types::MqSystemKind::Pulsar => "Pulsar",
+                            dbx_core::mq::types::MqSystemKind::Kafka => "Kafka",
+                            dbx_core::mq::types::MqSystemKind::RocketMq => "RocketMQ",
+                            dbx_core::mq::types::MqSystemKind::RabbitMq => "RabbitMQ",
+                        }
+                        .to_string(),
+                    ),
+                    product_version: info.server_version,
+                    driver_name: Some("Message Queue Admin API".to_string()),
+                    ..Default::default()
+                });
                 Ok("Connection successful".to_string())
             }
             #[cfg(not(feature = "mq-admin"))]
@@ -1499,7 +1753,7 @@ pub async fn connect_db(
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
     let config = config.canonicalized();
-    if config.db_type == DatabaseType::Sqlite {
+    if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_remote_worker_requested(&config) {
         db::sqlite::validate_persistent_attachments(
             &config.host,
             &config.password,
@@ -1515,16 +1769,29 @@ pub async fn connect_db(
     let mut connected_config = config.clone();
     let mut connected_db_config = db_config.clone();
 
-    state.remove_connection_pools_detached(&id).await;
+    // Plugin 连接的 connection/connect 是幂等 upsert：连接路径（首连、重推、
+    // 重连）只替换池条目，完全跳过旧池拆除——close 会向 sidecar 发
+    // connection/disconnect，其语义是"删注册表 + 杀掉该连接全部会话"，会把
+    // 同连接其他 tab 的活跃终端一起杀死。用户显式断开仍走 disconnect_db 的
+    // 完整关闭路径（会发 disconnect）。其他类型维持 detached 关闭不变。
+    if db_config.db_type == DatabaseType::Plugin {
+        state.drop_connection_pools_without_close(&id).await;
+    } else {
+        state.remove_connection_pools_detached(&id).await;
+    }
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
-    let (host, port) = state.connection_host_port(&id, &db_config).await?;
+    let endpoint = state.plugin_connection_endpoint(&id, &db_config).await?;
+    let (host, port) = (endpoint.host, endpoint.port);
+    let runtime_proxy = endpoint.proxy;
     if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
         state.reset_connection_transport_for_config(&id, &db_config).await;
         return Err(err);
     }
-    probe_connection_endpoint(&db_config, &host, port).await?;
+    if db_config.db_type != DatabaseType::Plugin {
+        probe_connection_endpoint(&db_config, &host, port).await?;
+    }
     if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
         state.reset_connection_transport_for_config(&id, &db_config).await;
         return Err(err);
@@ -1553,22 +1820,22 @@ pub async fn connect_db(
         | DatabaseType::Kwdb
         | DatabaseType::Questdb
         | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
-        DatabaseType::Sqlite => PoolKind::Sqlite(connect_sqlite_from_config(&db_config).await?),
+        DatabaseType::Sqlite => PoolKind::Sqlite(
+            connect_sqlite_from_config_with_state(Some(state.inner().as_ref()), &id, &db_config).await?,
+        ),
         DatabaseType::Redis => {
             let con = if db_config.uses_redis_cluster() {
-                PoolKind::Redis(db::redis_driver::RedisConnection::Cluster(
-                    state.connect_redis_cluster(&id, &db_config).await?,
-                ))
+                db::redis_driver::RedisConnection::Cluster(state.connect_redis_cluster(&id, &db_config).await?)
             } else if db_config.uses_redis_sentinel() {
-                PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+                db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
                     state.connect_redis_sentinel(&id, &db_config).await?,
-                )))
+                ))
             } else {
-                PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+                db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
                     db::redis_driver::connect_standalone(&db_config, &host, port, connect_timeout).await?,
-                )))
+                ))
             };
-            con
+            PoolKind::Redis(Arc::new(con))
         }
         #[cfg(feature = "duckdb-sidecar")]
         DatabaseType::DuckDb => state.create_duckdb_pool(&db_config).await?,
@@ -1686,9 +1953,22 @@ pub async fn connect_db(
                 db_config.url_params.as_deref(),
                 db_config.external_config.as_ref(),
                 connect_timeout,
-            );
+                Some(db_config.ca_cert_path.as_str()),
+                Some(db_config.client_cert_path.as_str()),
+                Some(db_config.client_key_path.as_str()),
+            )?;
             db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Elasticsearch(client)
+        }
+        DatabaseType::Salesforce => {
+            let client = db::salesforce_driver::SfClient::from_config(
+                &url,
+                Some(&db_config.password),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+            )?;
+            db::salesforce_driver::SfClient::test_connection(&client, connect_timeout).await?;
+            PoolKind::Salesforce(client)
         }
         DatabaseType::Easysearch => {
             let mut client = db::easysearch_driver::EasysearchClient::from_config(
@@ -1699,9 +1979,28 @@ pub async fn connect_db(
                 db_config.url_params.as_deref(),
                 db_config.external_config.as_ref(),
                 connect_timeout,
-            );
+                Some(db_config.ca_cert_path.as_str()),
+                Some(db_config.client_cert_path.as_str()),
+                Some(db_config.client_key_path.as_str()),
+            )?;
             db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Easysearch(client)
+        }
+        DatabaseType::Solr => {
+            let mut client = db::solr_driver::SolrClient::from_config(
+                &url,
+                Some(&db_config.username),
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+                Some(db_config.ca_cert_path.as_str()),
+                Some(db_config.client_cert_path.as_str()),
+                Some(db_config.client_key_path.as_str()),
+            )?;
+            db::solr_driver::test_connection(&mut client, connect_timeout).await?;
+            PoolKind::Solr(client)
         }
         DatabaseType::Meilisearch => {
             let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
@@ -1790,6 +2089,11 @@ pub async fn connect_db(
             db::influxdb_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::InfluxDb(client)
         }
+        DatabaseType::InfluxDb3 => {
+            let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &db_config, connect_timeout)?;
+            db::influxdb3_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::InfluxDb3(client)
+        }
         DatabaseType::VictoriaMetrics => {
             let client =
                 db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &db_config, connect_timeout)?;
@@ -1866,6 +2170,9 @@ pub async fn connect_db(
         DatabaseType::Mqtt => {
             return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
         }
+        DatabaseType::Plugin => PoolKind::PluginConnection(
+            state.plugin_host.connect_connection(&db_config, &host, port, runtime_proxy).await?,
+        ),
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 
@@ -1895,7 +2202,9 @@ pub async fn connection_final_proxy_port(
     if !runtime_config.has_effective_transport_layers() {
         return Err("Connection has no configured transport layers".to_string());
     }
-    if runtime_config.db_type == DatabaseType::Sqlite {
+    if runtime_config.db_type == DatabaseType::Sqlite
+        && !db::sqlite_worker::sqlite_remote_worker_requested(&runtime_config)
+    {
         db::sqlite::validate_persistent_attachments(
             &runtime_config.host,
             &runtime_config.password,
@@ -2007,6 +2316,65 @@ pub async fn check_connection_health(state: State<'_, Arc<AppState>>, connection
     state.check_connection_health(&connection_id).await
 }
 
+/// Read-only counterpart of `check_connection_health`: reports whether the connection still
+/// has a pool, without probing, mutating, or triggering a reconnect.
+///
+/// The frontend uses it to confirm a keepalive liveness event before greying the sidebar
+/// (#4339). `check_connection_health` must never be used for that confirmation: it removes
+/// unhealthy pools and is the path `ensureConnected` uses to reconnect.
+#[tauri::command]
+pub async fn connection_is_open(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<bool, String> {
+    Ok(state.is_connection_open(&connection_id).await)
+}
+
+/// Relay backend-confirmed liveness losses to the frontend (#4339).
+///
+/// Mirrors `install_plugin_event_bridge`: the core publishes to a broadcast channel and each
+/// shell owns its transport, so core never needs a UI handle.
+pub fn install_connection_liveness_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
+    let app_handle = app.clone();
+    let mut events = state.subscribe_connection_liveness();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(message) => {
+                    let _ = app_handle.emit("dbx-connection-liveness", message);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // The skipped messages are gone for good, so ask the frontend to re-check
+                    // every connection it still shows as connected. Dropping the transition
+                    // silently would leave a sidebar green indefinitely — exactly the state
+                    // this bridge exists to prevent.
+                    log::warn!("Desktop connection liveness bridge skipped {skipped} messages; requesting a resync");
+                    let _ = app_handle.emit("dbx-connection-liveness", ConnectionLivenessMessage::Resync);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Warm the driver and connection pool for a connection a tab is opening, so the
+/// first Run does not pay pool creation, tunnel setup, or external-driver (JDBC
+/// agent) startup while the user waits. Never removes an existing pool.
+#[tauri::command]
+pub async fn prewarm_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+    catalog: Option<String>,
+    client_session_id: Option<String>,
+) -> Result<(), String> {
+    state
+        .prewarm_connection_pool(
+            &connection_id,
+            database.as_deref().filter(|value| !value.is_empty()),
+            catalog.as_deref().filter(|value| !value.is_empty()),
+            client_session_id.as_deref().filter(|value| !value.is_empty()),
+        )
+        .await
+}
+
 #[tauri::command]
 pub async fn connection_identifier_quote(
     state: State<'_, Arc<AppState>>,
@@ -2032,6 +2400,39 @@ pub async fn save_connection_database_info(
     database_info: Option<DatabaseConnectionInfo>,
 ) -> Result<(), String> {
     state.save_connection_database_info(&connection_id, database_info).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteUnlockState {
+    pub remaining_ms: u64,
+}
+
+#[tauri::command]
+pub async fn unlock_connection_writes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    duration_secs: u64,
+) -> Result<WriteUnlockState, String> {
+    if !state.configs.read().await.contains_key(&connection_id) {
+        return Err("Connection not found".to_string());
+    }
+    let remaining_ms = state.write_unlock_windows.unlock(&connection_id, duration_secs).await?;
+    Ok(WriteUnlockState { remaining_ms })
+}
+
+#[tauri::command]
+pub async fn lock_connection_writes(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
+    state.write_unlock_windows.lock(&connection_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn connection_write_unlock_state(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<WriteUnlockState, String> {
+    Ok(WriteUnlockState { remaining_ms: state.write_unlock_windows.remaining_ms(&connection_id).await })
 }
 
 /// Check whether a connection has read-only protection enabled.

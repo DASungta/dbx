@@ -15,12 +15,52 @@ import {
 } from "@/lib/table/tableImport";
 
 describe("tableImport", () => {
-  it("preserves explicit empty strings by default for Excel only", () => {
+  it("keeps empty fields as empty strings for every source format by default", () => {
+    // 导出端默认用 `\N` 表示 NULL，空字段代表空字符串；导入端默认必须与之一致，
+    // 否则 DBX 导出的 CSV 再导回时会把 '' 变成 NULL。
     expect(defaultTableImportEmptyStringAsNull("excel")).toBe(false);
-    expect(defaultTableImportEmptyStringAsNull("csv")).toBe(true);
-    expect(defaultTableImportEmptyStringAsNull("tsv")).toBe(true);
-    expect(defaultTableImportEmptyStringAsNull("delimited")).toBe(true);
-    expect(defaultTableImportEmptyStringAsNull("json")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("csv")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("tsv")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("delimited")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("json")).toBe(false);
+  });
+
+  it("only disables the shared NULL literal when empty fields are treated as NULL", () => {
+    const baseSettings = {
+      delimiter: ",",
+      textEncoding: "auto" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      jsonShape: "auto" as const,
+    };
+
+    const sharedLiteral = buildTableImportParseOptions({ ...baseSettings, format: "csv", emptyStringAsNull: false });
+    expect(sharedLiteral.nullLiteral).toBeUndefined();
+    expect(sharedLiteral.emptyStringAsNull).toBe(false);
+
+    const legacyEmptyField = buildTableImportParseOptions({ ...baseSettings, format: "csv", emptyStringAsNull: true });
+    expect(legacyEmptyField.nullLiteral).toBe("");
+    expect(legacyEmptyField.emptyStringAsNull).toBe(true);
+  });
+
+  it("passes the decimal separator only for delimited sources", () => {
+    const settings = {
+      delimiter: ";",
+      decimalSeparator: ",",
+      textEncoding: "auto" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      emptyStringAsNull: false,
+      jsonShape: "auto" as const,
+    };
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "csv" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "tsv" }).decimalSeparator).toBe(",");
+    expect(buildTableImportParseOptions({ ...settings, format: "json" }).decimalSeparator).toBeNull();
   });
 
   it("formats import elapsed time for progress and terminal summaries", () => {
@@ -113,6 +153,26 @@ describe("tableImport", () => {
 
     expect(buildTableImportParseOptions({ ...baseSettings, format: "excel", sheetName: "Second" }).sheetName).toBe("Second");
     expect(buildTableImportParseOptions({ ...baseSettings, format: "csv", sheetName: "Second" }).sheetName).toBeNull();
+  });
+
+  it("passes the text encoding for SQL script sources like delimited text", () => {
+    const settings = {
+      delimiter: ",",
+      textEncoding: "gbk" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      emptyStringAsNull: true,
+      jsonShape: "auto" as const,
+      databaseType: "mysql" as const,
+    };
+
+    expect(buildTableImportParseOptions({ ...settings, format: "sql" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "sql" }).sqlDialect).toBe("mysql");
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).sqlDialect).toBeNull();
+    expect(buildTableImportParseOptions({ ...settings, format: "excel" }).encoding).toBeNull();
   });
 
   it("suggests create-table data types from preview rows", () => {

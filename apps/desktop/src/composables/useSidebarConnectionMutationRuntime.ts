@@ -116,7 +116,9 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       await connectionStore.removeConnections(connectionIds);
       options.releaseActiveNodeReference(targets.map((target) => target.id));
       for (const connectionId of connectionIds) {
-        connectionStore.disconnect(connectionId).catch((error) => {
+        // 页签已由 removeConnections 按「删除连接」策略处理，这里只清会话，
+        // 避免再套用「断开连接」策略把刚保留的 SQL 页签关掉。
+        connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
           // Removal has already succeeded; disconnect cleanup must not turn it into a failed delete.
           console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
         });
@@ -212,16 +214,11 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     }
   }
 
-  async function disconnectConnection() {
-    const targets = selectedConnectionDisconnectTargets(activeNode.value, selectedTreeNodesInVisibleOrder()).filter((target) => connectionStore.connectedIds.has(target.connectionId));
-    if (!targets.length) return;
-
-    const result = await disconnectSidebarConnections(
-      targets.map((target) => target.connectionId),
-      (connectionId) => connectionStore.disconnect(connectionId),
-    );
+  async function disconnectConnectionIds(connectionIds: readonly string[]) {
+    if (!connectionIds.length) return;
+    const result = await disconnectSidebarConnections(connectionIds, (connectionId) => connectionStore.disconnect(connectionId));
     if (!result.failed) {
-      toast(targets.length > 1 ? t("connection.disconnectedSelected", { count: targets.length }) : t("connection.disconnected"), 2000);
+      toast(connectionIds.length > 1 ? t("connection.disconnectedSelected", { count: connectionIds.length }) : t("connection.disconnected"), 2000);
       return;
     }
     if (result.succeeded > 0) {
@@ -230,6 +227,35 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     }
     const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
     toast(t("connection.saveFailed", { message }), 5000);
+  }
+
+  async function restoreSqliteDatabase() {
+    const connectionId = activeNode.value.connectionId;
+    const config = connectionId ? connectionStore.getConfig(connectionId) : undefined;
+    if (!connectionId || !config) return;
+    const usesSsh = (config.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
+    if (!usesSsh) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const sourcePath = await open({
+      multiple: false,
+      filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "bak"] }],
+    });
+    if (typeof sourcePath !== "string" || !sourcePath) return;
+    try {
+      toast(t("contextMenu.restoreSqliteDatabaseInProgress"), 2000);
+      await connectionStore.ensureConnected(connectionId);
+      await api.restoreSqliteDatabase(connectionId, sourcePath);
+      toast(t("contextMenu.restoreSqliteDatabaseSuccess"), 3000);
+    } catch (error: any) {
+      toast(t("contextMenu.restoreSqliteDatabaseFailed", { message: error?.message || String(error) }), 5000);
+    }
+  }
+
+  async function disconnectConnection() {
+    const connectionIds = selectedConnectionDisconnectTargets(activeNode.value, selectedTreeNodesInVisibleOrder())
+      .filter((target) => connectionStore.connectedIds.has(target.connectionId))
+      .map((target) => target.connectionId);
+    await disconnectConnectionIds(connectionIds);
   }
 
   function connectionDisconnectTargets() {
@@ -244,6 +270,24 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   function canDisconnectConnection(): boolean {
     return connectionDisconnectTargets().some((target) => connectionStore.connectedIds.has(target.connectionId));
+  }
+
+  function connectionGroupDisconnectTargets(): string[] {
+    const node = activeNode.value;
+    if (node.type !== "connection-group") return [];
+    return connectionStore.connectionIdsInGroups([node.id]).filter((connectionId) => connectionStore.connectedIds.has(connectionId));
+  }
+
+  function connectionGroupDisconnectMenuLabel(): string {
+    return t("connectionGroup.closeConnections", { count: connectionGroupDisconnectTargets().length });
+  }
+
+  function canDisconnectConnectionGroup(): boolean {
+    return connectionGroupDisconnectTargets().length > 0;
+  }
+
+  async function disconnectConnectionGroup() {
+    await disconnectConnectionIds(connectionGroupDisconnectTargets());
   }
 
   /** "断开并忘记本次密码"是否可用：save_password=false 且当前已连接（本次运行期必已输入密码）。 */
@@ -370,7 +414,8 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       const connectionIds = await connectionStore.deleteConnectionGroups(groupIds, deleteConnectionsWithGroup.value);
       options.releaseActiveNodeReference(groupIds);
       for (const connectionId of connectionIds) {
-        connectionStore.disconnect(connectionId).catch((error) => {
+        // 页签已由 deleteConnectionGroups 按「删除连接」策略处理，这里只清会话。
+        connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
           console.warn("[DBX][connection-group:delete:disconnect-failed]", { connectionId, error });
         });
       }
@@ -423,9 +468,13 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     sqliteBackupSource,
     canBackupSqliteDatabase,
     backupSqliteDatabase,
+    restoreSqliteDatabase,
     disconnectConnection,
     connectionDisconnectMenuLabel,
     canDisconnectConnection,
+    connectionGroupDisconnectMenuLabel,
+    canDisconnectConnectionGroup,
+    disconnectConnectionGroup,
     canForgetSessionCredential,
     disconnectAndForgetConnectionPassword,
     cancelConnectionAttempt,

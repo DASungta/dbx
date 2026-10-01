@@ -153,9 +153,14 @@ export function manifestDatabaseTypes(): DatabaseType[] {
   return DATABASE_DRIVER_ENTRIES.map((entry) => entry.dbType);
 }
 
-export function usesAgentCursorForQuery(dbType?: DatabaseType): boolean {
+export function usesAgentCursorForQuery(dbType?: DatabaseType, driverProfile?: string): boolean {
+  if (dbType === "sqlserver" && driverProfile?.trim().toLowerCase() === "sqlserver-legacy") return true;
   const runtimeMode = databaseRuntimeMode(dbType);
   return runtimeMode === "agent" || runtimeMode === "external";
+}
+
+export function usesAgentCursorForTableData(dbType?: DatabaseType, driverProfile?: string): boolean {
+  return dbType === "cassandra" || (dbType === "sqlserver" && driverProfile?.trim().toLowerCase() === "sqlserver-legacy");
 }
 
 function productCapabilities(overrides: Partial<DatabaseProductCapabilities>): DatabaseProductCapabilities {

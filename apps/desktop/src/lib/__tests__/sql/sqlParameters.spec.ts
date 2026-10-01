@@ -34,6 +34,25 @@ describe("extractSqlParameters", () => {
       { key: "params", name: "params", syntax: "named", token: ":params" },
       { key: "context", name: "context", syntax: "sqlserver", token: "@context" },
     ]);
+    expect(extractSqlParameters("select :customer_id", { databaseType: "mysql" })).toEqual(["customer_id"]);
+  });
+
+  it("preserves Neo4j pattern labels and relationship types", () => {
+    const cypher = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"})\nRETURN p.name, p.job, c.name';
+    const options = { databaseType: "neo4j" as const };
+    expect(extractSqlParameterDescriptors(cypher, options)).toEqual([]);
+    expect(substituteSqlParameters(cypher, {}, options)).toBe(cypher);
+    expect(extractSqlParameterDescriptors(cypher, { ...options, enabledSyntaxes: ["named"] as const })).toEqual([]);
+    expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p", options)).toEqual(["name"]);
+  });
+
+  it("keeps NebulaGraph tags and edge types intact in nGQL", () => {
+    const ngql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"}) RETURN p.Person.name LIMIT 10';
+    const options = { databaseType: "nebula" as const };
+    expect(extractSqlParameterDescriptors(ngql, options)).toEqual([]);
+    expect(substituteSqlParameters(ngql, {}, options)).toBe(ngql);
+    expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p LIMIT 10", options)).toEqual(["name"]);
+    expect(extractSqlParameters("select :customer_id", { databaseType: "mysql" })).toEqual(["customer_id"]);
   });
 
   it("extracts unique template parameters in order", () => {
@@ -267,6 +286,64 @@ describe("extractSqlParameters", () => {
       select * from orders where created_at between @date_start and @date_end and tenant_id = @tenant_id
     `;
     expect(extractSqlParameters(sql)).toEqual(["tenant_id"]);
+  });
+
+  it("ignores MySQL user variables targeted by SELECT INTO", () => {
+    const sql = `
+      select project_id,
+             year(date_sub(review_date, interval 1 month)),
+             month(date_sub(review_date, interval 1 month))
+        into @project_id, @year, @month
+        from cms_dynamic_cost_review
+       where id = '9f03cb27-a553-11f1-8af2-48dc2d090a1c';
+      select @project_id, @year, @month;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("keeps ordinary MySQL template parameters around SELECT INTO targets", () => {
+    const sql = `
+      select project_id from cms_dynamic_cost_review where id = @input_id into @project_id;
+      select @project_id where @tenant_id > 0;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["input_id", "tenant_id"]);
+  });
+
+  it("ignores MySQL user variables assigned by GET DIAGNOSTICS", () => {
+    const sql = `
+      get diagnostics condition 1 @err_state = returned_sqlstate, @err_msg = message_text;
+      select concat('failed: ', @err_state, ' ', @err_msg) as result;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("ignores GET CURRENT/STACKED DIAGNOSTICS targets and the statement-level row count", () => {
+    const sql = `
+      get diagnostics @affected = row_count;
+      get current diagnostics condition 1 @current_state = returned_sqlstate;
+      get stacked diagnostics condition 1 @stacked_state = returned_sqlstate;
+      select @affected, @current_state, @stacked_state;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("keeps ordinary MySQL template parameters next to GET DIAGNOSTICS targets", () => {
+    const sql = `
+      get diagnostics condition 1 @err_msg = message_text;
+      select * from audit_log where tenant_id = @tenant_id and note = @err_msg;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["tenant_id"]);
+  });
+
+  it("keeps a template parameter on a column named get", () => {
+    const sql = "select get from api_methods where tenant_id = @tenant_id";
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["tenant_id"]);
   });
 
   it("ignores SQL Server procedure parameters declared in routine definitions", () => {
@@ -674,6 +751,12 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
 });
 
 describe("substituteSqlParameters", () => {
+  it("preserves empty raw placeholders", () => {
+    const sql = "select ${raw_value}, '${raw_value}', 'prefix ${raw_value} suffix'";
+
+    expect(substituteSqlParameters(sql, { raw_value: { kind: "raw", value: "  " } })).toBe(sql);
+  });
+
   it("substitutes dotted names by their complete key", () => {
     const sql = "select ${params.id}, #{params.profile.name}, 'prefix${params.label}'";
     expect(
@@ -877,7 +960,7 @@ describe("substituteSqlParameters", () => {
     ).toBe("select * from t where dt >= '2026-06-26' and amount > 100.50 and enabled = TRUE");
   });
 
-  it("replaces exact quoted braced placeholders as whole tokens without double-quoting", () => {
+  it("preserves single-quoted string contexts for exact braced placeholders", () => {
     const sql = "select * from t where dt = '${date}' and name = \"${name}\" and flag = '#{enabled}' and id = ${id}";
     expect(
       substituteSqlParameters(sql, {
@@ -886,7 +969,29 @@ describe("substituteSqlParameters", () => {
         enabled: { kind: "boolean", value: "true" },
         id: { kind: "number", value: "7" },
       }),
-    ).toBe("select * from t where dt = '2026-06-26' and name = 'O''Reilly' and flag = TRUE and id = 7");
+    ).toBe("select * from t where dt = '2026-06-26' and name = 'O''Reilly' and flag = 'true' and id = 7");
+  });
+
+  it("keeps explicit quotes around raw and numeric parameter values", () => {
+    const sql = "select ${raw_value}, '${raw_value}', ${number_value}, '${number_value}'";
+    expect(
+      substituteSqlParameters(sql, {
+        raw_value: { kind: "raw", value: "current_date" },
+        number_value: { kind: "number", value: "42" },
+      }),
+    ).toBe("select current_date, 'current_date', 42, '42'");
+  });
+
+  it("replaces exact quoted null and empty typed values with SQL NULL", () => {
+    const sql = "select '${null_value}', '${empty_number}', '${empty_raw}', '${empty_string}'";
+    expect(
+      substituteSqlParameters(sql, {
+        null_value: { kind: "null", value: "NULL" },
+        empty_number: { kind: "number", value: "" },
+        empty_raw: { kind: "raw", value: "  " },
+        empty_string: { kind: "string", value: "" },
+      }),
+    ).toBe("select NULL, NULL, '${empty_raw}', ''");
   });
 
   it("replaces placeholders embedded in ordinary SQL string values", () => {

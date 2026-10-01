@@ -25,6 +25,7 @@ import {
   isSwitchToPreviousTabShortcut,
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
+  isToggleResultsPaneShortcut,
   isToggleTransposeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
@@ -216,6 +217,21 @@ test("preserves explicitly configured tab history shortcuts during migration", (
   assert.equal(normalized.switchToPreviousTab, backShortcut);
 });
 
+test("clears the gotoLine default when an explicit editor binding already owns its key", () => {
+  // Ctrl+G was a legal explicit binding slot before gotoLine adopted it on
+  // Windows/Linux; the user's explicit choice must keep winning over the new
+  // default (which registers earlier in the runtime keymap).
+  const windows = normalizeShortcutSettings({ formatSql: "Ctrl+G" }, "Win32");
+  assert.equal(windows.gotoLine, "");
+  assert.equal(windows.formatSql, "Ctrl+G");
+
+  // macOS defaults (⌘⌥G) never collide, and an explicit gotoLine config wins.
+  const mac = normalizeShortcutSettings({ formatSql: "Ctrl+G" }, "MacIntel");
+  assert.equal(mac.gotoLine, "Mod+Alt+G");
+  const explicit = normalizeShortcutSettings({ gotoLine: "Ctrl+G" }, "Win32");
+  assert.equal(explicit.gotoLine, "Ctrl+G");
+});
+
 test("matches Mod+number for switching to numbered tabs", () => {
   assert.equal(switchToTabIndexFromShortcut({ key: "1", metaKey: true }), 0);
   assert.equal(switchToTabIndexFromShortcut({ key: "5", ctrlKey: true }), 4);
@@ -315,6 +331,23 @@ test("matches F5 for refreshing data", () => {
   assert.equal(isRefreshDataShortcut({ key: "F5" }), true);
 });
 
+test("keeps the results pane shortcut unbound until the user configures it", () => {
+  const configured = { toggleResultsPane: "Mod+G" } as any;
+
+  assert.equal(DEFAULT_SHORTCUT_SETTINGS.toggleResultsPane, "");
+  assert.equal(normalizeShortcutSettings({}).toggleResultsPane, "");
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true }), false);
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true }, configured), true);
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true, isComposing: true }, configured), false);
+  assert.equal(isToggleResultsPaneShortcut({ key: "g", ctrlKey: true }, { toggleResultsPane: "" } as any), false);
+});
+
+test("reports conflicts for a configured global results pane shortcut", () => {
+  const shortcuts = { ...DEFAULT_SHORTCUT_SETTINGS, toggleResultsPane: "Mod+F" };
+
+  assert.equal(findShortcutConflict("toggleResultsPane", "Mod+F", shortcuts), "focusSearch");
+});
+
 test("matches configurable shortcut for toggling transpose view", () => {
   assert.equal(isToggleTransposeShortcut({ key: "Tab" }), true);
   assert.equal(isToggleTransposeShortcut({ key: "Tab" }, { toggleTranspose: "Alt+T" } as any), false);
@@ -374,8 +407,9 @@ test("matches Cmd+S for saving", () => {
   assert.equal(isSaveShortcut({ key: "s", metaKey: true }), true);
 });
 
-test("matches Mod+D for copying current row", () => {
+test("matches copy current row Mod+D by default while honoring custom shortcuts", () => {
   assert.equal(isCopyCurrentRowShortcut({ key: "d", metaKey: true }), true);
+  assert.equal(isCopyCurrentRowShortcut({ key: "d", altKey: true }, { copyCurrentRow: "Alt+D" }), true);
 });
 
 test("matches Delete for deleting current row", () => {

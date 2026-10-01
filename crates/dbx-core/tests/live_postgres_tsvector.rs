@@ -78,6 +78,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
         rows: result.rows.clone(),
         exclude_primary_keys: false,
         include_computed_columns: false,
+        include_database_name: true,
         insert_mode: DataGridCopyInsertMode::Merged,
     })
     .expect("copy insert");
@@ -93,6 +94,8 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
         columns: result.columns.clone(),
         column_types: result.column_types.iter().map(|value| Some(value.clone())).collect(),
         column_extras: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
         rows: result.rows.clone(),
         batch_size: Some(10),
     })

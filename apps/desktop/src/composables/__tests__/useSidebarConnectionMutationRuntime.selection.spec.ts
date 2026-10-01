@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowRef } from "vue";
-import { connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
+import { connectionDeleteTargetSnapshot, connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import type { TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({
+vi.mock("vue-i18n", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-i18n")>()),
   useI18n: () => ({
     t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key),
   }),
@@ -67,6 +68,7 @@ function connectionStore(selectedTreeNodeIds: string[]) {
     connectedIds: new Set<string>(),
     connectingIds: new Set<string>(),
     disconnect: vi.fn().mockResolvedValue(undefined),
+    disconnectAndForgetConnectionPassword: vi.fn().mockResolvedValue(undefined),
     isTreeNodeChildrenLoaded: vi.fn(() => false),
     getConfig: vi.fn(() => undefined),
     isDefaultDatabase: vi.fn(() => false),
@@ -172,6 +174,35 @@ describe("sidebar connection move selection", () => {
   });
 });
 
+describe("sidebar connection deletion selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+    connectionDeleteTargetSnapshot.value = [];
+    showDeleteConfirm.value = false;
+  });
+
+  it("deletes the selected connections and leaves tab handling to the delete policy", async () => {
+    const nodes = [connectionNode("conn-1"), connectionNode("conn-2")];
+    const store = connectionStore(nodes.map((node) => node.id));
+    const { deleteConnection, confirmDelete } = runtime(nodes[0], store, nodes);
+
+    deleteConnection();
+    expect(showDeleteConfirm.value).toBe(true);
+
+    await confirmDelete();
+
+    expect(store.removeConnections).toHaveBeenCalledWith(["conn-1", "conn-2"]);
+    // removeConnections 已按「删除连接」策略处理页签，disconnect 必须跳过断开策略，
+    // 否则会把刚保留下来的 SQL 页签又关掉。
+    expect(store.disconnect.mock.calls).toEqual([
+      ["conn-1", { skipTabHandling: true }],
+      ["conn-2", { skipTabHandling: true }],
+    ]);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.deletedSelected:{"count":2}', 2000);
+  });
+});
+
 describe("sidebar connection group deletion selection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -219,7 +250,11 @@ describe("sidebar connection group deletion selection", () => {
 
     expect(store.removeConnections).not.toHaveBeenCalled();
     expect(store.deleteConnectionGroups).toHaveBeenCalledWith(["group-1", "group-2"], true);
-    expect(store.disconnect.mock.calls).toEqual([["conn-1"], ["conn-2"]]);
+    // 页签已由 deleteConnectionGroups 按「删除连接」策略处理，disconnect 只清会话。
+    expect(store.disconnect.mock.calls).toEqual([
+      ["conn-1", { skipTabHandling: true }],
+      ["conn-2", { skipTabHandling: true }],
+    ]);
     expect(showDeleteGroupConfirm.value).toBe(false);
     expect(connectionGroupDeleteTargetSnapshot.value).toEqual([]);
     expect(deleteConnectionsWithGroup.value).toBe(false);
@@ -241,6 +276,60 @@ describe("sidebar connection group deletion selection", () => {
     expect(showDeleteGroupConfirm.value).toBe(true);
     expect(connectionGroupDeleteTargetSnapshot.value.map((target) => target.id)).toEqual(["group-1"]);
     expect(mocks.toast).toHaveBeenCalledWith('connection.saveFailed:{"message":"persist failed"}', 5000);
+  });
+});
+
+describe("sidebar connection group disconnect", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+  });
+
+  it("recursively disconnects only connected connections under a collapsed group", async () => {
+    const group = connectionGroupNode("group-parent");
+    group.isExpanded = false;
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1", "conn-2", "conn-3"]);
+    store.connectedIds = new Set(["conn-1", "conn-3"]);
+    const { canDisconnectConnectionGroup, connectionGroupDisconnectMenuLabel, disconnectConnectionGroup } = runtime(group, store);
+
+    expect(canDisconnectConnectionGroup()).toBe(true);
+    expect(connectionGroupDisconnectMenuLabel()).toBe('connectionGroup.closeConnections:{"count":2}');
+    await disconnectConnectionGroup();
+
+    expect(store.connectionIdsInGroups).toHaveBeenCalledWith(["group-parent"]);
+    expect(store.disconnect.mock.calls).toEqual([["conn-1"], ["conn-3"]]);
+    expect(store.removeConnections).not.toHaveBeenCalled();
+    expect(store.deleteConnectionGroups).not.toHaveBeenCalled();
+    expect(store.disconnectAndForgetConnectionPassword).not.toHaveBeenCalled();
+  });
+
+  it("disables and safely no-ops when the group has no connected connections", async () => {
+    const group = connectionGroupNode("group-parent");
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1", "conn-2"]);
+    const { canDisconnectConnectionGroup, connectionGroupDisconnectMenuLabel, disconnectConnectionGroup } = runtime(group, store);
+
+    expect(canDisconnectConnectionGroup()).toBe(false);
+    expect(connectionGroupDisconnectMenuLabel()).toBe('connectionGroup.closeConnections:{"count":0}');
+    await disconnectConnectionGroup();
+
+    expect(store.disconnect).not.toHaveBeenCalled();
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("continues group disconnects after one connection fails", async () => {
+    const group = connectionGroupNode("group-parent");
+    const store = connectionStore([group.id]);
+    store.connectionIdsInGroups.mockReturnValue(["conn-1", "conn-2"]);
+    store.connectedIds = new Set(["conn-1", "conn-2"]);
+    store.disconnect.mockRejectedValueOnce(new Error("failed")).mockResolvedValueOnce(undefined);
+    const { disconnectConnectionGroup } = runtime(group, store);
+
+    await disconnectConnectionGroup();
+
+    expect(store.disconnect.mock.calls).toEqual([["conn-1"], ["conn-2"]]);
+    expect(mocks.toast).toHaveBeenCalledWith('connection.disconnectSelectedPartial:{"succeeded":1,"failed":1}', 5000);
   });
 });
 

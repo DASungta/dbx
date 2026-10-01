@@ -2,7 +2,7 @@ import type { DatabaseType } from "@/types/database";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
-export type ObjectBrowserRowAction = "table-info" | "type-info" | "open-table" | "open-source" | "none";
+export type ObjectBrowserRowAction = "table-info" | "type-info" | "open-table" | "open-source" | "open-source-tab" | "none";
 
 /**
  * Determine the action for a single click on an object browser row.
@@ -16,6 +16,7 @@ export type ObjectBrowserRowAction = "table-info" | "type-info" | "open-table" |
  */
 export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
+  if (dbType === "mongodb") return mongoObjectBrowserRowAction(row);
   if (row.type === "TABLE") return "table-info";
   if (row.type === "EVENT") return "none";
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
@@ -25,15 +26,22 @@ export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, d
 
 /**
  * Determine the action for a double click on an object browser row.
- * - TABLE → open-table (open table data tab)
- * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
+ * - TABLE/VIEW/MATERIALIZED_VIEW → open-table (open data tab, matching the
+ *   sidebar's data-node double-click behavior)
+ * - PROCEDURE/FUNCTION → open-source-tab (editable source tab; single click keeps the side panel)
+ * - TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
  * - otherwise → none
  */
 export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
-  if (row.type === "TABLE") return "open-table";
+  if (dbType === "mongodb") return mongoObjectBrowserRowAction(row);
+  if (row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return "open-table";
   if (row.type === "EVENT") return "open-source";
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
+  // Routines are the only source-backed rows with a dedicated double-click
+  // gesture (issue #10202): single click keeps the side panel, double click
+  // hands the object to the source tab. canOpenSource always accepts them.
+  if (row.type === "PROCEDURE" || row.type === "FUNCTION") return "open-source-tab";
   if (canOpenSource(row, dbType)) return "open-source";
   return "none";
 }
@@ -44,7 +52,8 @@ export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined, d
  *
  * In both single-click and double-click activation modes, a single click
  * triggers the side-panel action (table-info / open-source). When a distinct
- * double-click action exists (e.g. TABLE single→table-info, double→open-table),
+ * double-click action exists (e.g. TABLE single→table-info, double→open-table;
+ * PROCEDURE single→open-source, double→open-source-tab),
  * the caller defers the single-click via shouldDeferSingleClick so the second
  * click can cancel it.
  */
@@ -62,13 +71,14 @@ export function resolveRowClickAction(row: ObjectBrowserRow | null | undefined, 
  * Whether a single-click action should be deferred to distinguish it from a
  * possible upcoming double-click. Applies when the row's single-click and
  * double-click actions differ (e.g. TABLE: single → table-info, double →
- * open-table). For rows whose single and double actions are identical
- * (e.g. VIEW → open-source both), no deferral is needed.
+ * open-table; PROCEDURE/FUNCTION: single → open-source, double →
+ * open-source-tab). For rows whose single and double actions are identical
+ * (e.g. SEQUENCE → open-source both), no deferral is needed.
  */
-export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined, action: ObjectBrowserRowAction): boolean {
+export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined, action: ObjectBrowserRowAction, dbType?: DatabaseType): boolean {
   if (action === "none") return false;
-  const single = singleClickRowAction(row);
-  const double = doubleClickRowAction(row);
+  const single = singleClickRowAction(row, dbType);
+  const double = doubleClickRowAction(row, dbType);
   return single !== double && action === single;
 }
 
@@ -78,6 +88,10 @@ export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined,
  */
 export function isSourceOnlyObjectBrowserRow(row: ObjectBrowserRow): boolean {
   return row.type === "TRIGGER" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY";
+}
+
+function mongoObjectBrowserRowAction(row: ObjectBrowserRow): ObjectBrowserRowAction {
+  return row.type === "TABLE" || row.type === "VIEW" ? "open-table" : "none";
 }
 
 function canOpenSource(row: ObjectBrowserRow, dbType?: DatabaseType): boolean {

@@ -1,11 +1,15 @@
+mod background_backup;
 mod commands;
 mod data_dir;
+pub use background_backup::run_if_requested as run_backup_worker_if_requested;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
 #[cfg(target_os = "macos")]
 mod macos_escape_guard;
+mod migration_gate;
 mod models;
+mod plugin_ui_protocol;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
@@ -45,6 +49,10 @@ const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 #[cfg(target_os = "macos")]
 const APP_MENU_COPY_SUPPORT_INFO_ID: &str = "app-menu-copy-support-info";
+#[cfg(target_os = "macos")]
+const APP_MENU_CLOSE_TAB_ID: &str = "app-menu-close-tab";
+#[cfg(target_os = "macos")]
+const APP_CLOSE_ACTIVE_TAB_EVENT: &str = "dbx-close-active-tab";
 
 pub struct CloseBehaviorState {
     confirmed_exit: AtomicBool,
@@ -115,6 +123,18 @@ fn should_hide_window_on_close(target_os: &str) -> bool {
     matches!(target_os, "macos" | "windows")
 }
 
+/// How long to keep the app off-screen after hiding it and before the process
+/// exits, so WindowServer has removed the window before WKWebView teardown.
+#[cfg(target_os = "macos")]
+pub(crate) const EXIT_HIDE_GRACE_MS: u64 = 250;
+
+/// On macOS, tearing down WKWebView while the window is still on screen can
+/// paint the window red for a frame before the process exits, so the app is
+/// hidden first. Windows and Linux keep their existing exit behavior.
+fn should_hide_window_before_exit(target_os: &str) -> bool {
+    target_os == "macos"
+}
+
 fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool, linux_appindicator_available: bool) -> bool {
     show_tray_icon
         && (matches!(target_os, "macos" | "windows") || (target_os == "linux" && linux_appindicator_available))
@@ -170,8 +190,8 @@ fn append_startup_probe(message: impl AsRef<str>) {
     startup_recovery::record(message);
 }
 
-pub(crate) fn clear_startup_probe_after_frontend_ready() {
-    startup_recovery::mark_frontend_ready();
+pub(crate) fn clear_startup_probe_after_frontend_ready(main_window_visible: bool) {
+    startup_recovery::mark_frontend_ready(main_window_visible);
 }
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
@@ -214,6 +234,13 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
         true,
         Some("Cmd+Q"),
     )?;
+    let close_tab_item = MenuItem::with_id(
+        app_handle,
+        APP_MENU_CLOSE_TAB_ID,
+        app_menu_close_tab_label(&current_app_locale(app_handle)),
+        true,
+        Some("Cmd+W"),
+    )?;
 
     Menu::with_items(
         app_handle,
@@ -234,7 +261,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                     &quit_item,
                 ],
             )?,
-            &Submenu::with_items(app_handle, "File", true, &[&PredefinedMenuItem::close_window(app_handle, None)?])?,
+            &Submenu::with_items(app_handle, "File", true, &[&close_tab_item])?,
             &Submenu::with_items(
                 app_handle,
                 "Edit",
@@ -254,12 +281,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                 app_handle,
                 "Window",
                 true,
-                &[
-                    &PredefinedMenuItem::minimize(app_handle, None)?,
-                    &PredefinedMenuItem::maximize(app_handle, None)?,
-                    &PredefinedMenuItem::separator(app_handle)?,
-                    &PredefinedMenuItem::close_window(app_handle, None)?,
-                ],
+                &[&PredefinedMenuItem::minimize(app_handle, None)?, &PredefinedMenuItem::maximize(app_handle, None)?],
             )?,
             &Submenu::with_items(app_handle, "Help", true, &[])?,
         ],
@@ -464,37 +486,12 @@ fn linux_webkit_environment_override<'a>(
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_system_gtk3_immodules_cache_path() -> Option<&'static str> {
-    [
-        "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib/aarch64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib64/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib/gtk-3.0/3.0.0/immodules.cache",
-    ]
-    .iter()
-    .copied()
-    .find(|path| std::path::Path::new(path).is_file())
-}
-
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_appimage_wayland_backend_override(
-    appimage: Option<&std::ffi::OsStr>,
-    wayland_display: Option<&std::ffi::OsStr>,
-    gdk_backend: Option<&std::ffi::OsStr>,
-) -> Option<&'static str> {
-    if appimage.is_some() && wayland_display.is_some() && gdk_backend.is_none() {
-        // AppImage uses the host GTK/WebKitGTK stack. Prefer XWayland for the
-        // affected Wayland/EGL path, but keep Wayland and other compiled
-        // backends as fallbacks for systems without XWayland.
-        Some("x11,wayland,*")
-    } else {
-        None
-    }
+fn linux_appimage_requires_dmabuf_workaround(appimage: Option<&std::ffi::OsStr>) -> bool {
+    appimage.is_some_and(|value| !value.is_empty())
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_uses_native_wayland(
-    appimage: Option<&std::ffi::OsStr>,
     wayland_display: Option<&std::ffi::OsStr>,
     session_type: Option<&std::ffi::OsStr>,
     gdk_backend: Option<&std::ffi::OsStr>,
@@ -506,8 +503,7 @@ fn linux_uses_native_wayland(
         return false;
     }
 
-    let automatic_backend = linux_appimage_wayland_backend_override(appimage, wayland_display, gdk_backend);
-    gdk_backend.or_else(|| automatic_backend.map(std::ffi::OsStr::new)).is_none_or(|backends| {
+    gdk_backend.is_none_or(|backends| {
         backends
             .to_string_lossy()
             .split(',')
@@ -516,34 +512,10 @@ fn linux_uses_native_wayland(
     })
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_appimage_system_gtk_immodules_cache(
-    appimage: Option<&std::ffi::OsStr>,
-    appdir: Option<&std::ffi::OsStr>,
-    gtk_im_module: Option<&std::ffi::OsStr>,
-    gtk_im_module_file: Option<&std::ffi::OsStr>,
-    system_cache_path: Option<&'static str>,
-) -> Option<&'static str> {
-    let system_cache_path = system_cache_path?;
-    if appimage.is_none() || gtk_im_module.is_none() {
-        return None;
-    }
-
-    let Some(gtk_im_module_file) = gtk_im_module_file else {
-        return Some(system_cache_path);
-    };
-    let appdir = appdir?;
-
-    if std::path::Path::new(gtk_im_module_file).starts_with(std::path::Path::new(appdir)) {
-        Some(system_cache_path)
-    } else {
-        None
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
     let render_devices = linux_drm_render_devices();
+    let appimage = std::env::var_os("APPIMAGE");
     let explicit_device_file = std::env::var_os("WEBKIT_WEB_RENDER_DEVICE_FILE")
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
@@ -558,11 +530,20 @@ fn apply_linux_webkit_rendering_workarounds() {
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
     let uses_native_wayland = linux_uses_native_wayland(
-        std::env::var_os("APPIMAGE").as_deref(),
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         std::env::var_os("XDG_SESSION_TYPE").as_deref(),
         std::env::var_os("GDK_BACKEND").as_deref(),
     );
+    // AppImages bundle WebKitGTK/GTK but use the host EGL/GL stack. On some
+    // combinations, WebKit's DMABUF initialization aborts the WebProcess
+    // before it can fall back to software rendering. Keep this opt-out
+    // user-overridable and use the stable shared-memory renderer instead.
+    if linux_appimage_requires_dmabuf_workaround(appimage.as_deref())
+        && linux_webkit_environment_override(std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").as_deref(), "1")
+            .is_some()
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     for (key, value) in linux_webkit_rendering_workarounds(
         nvidia_driver,
         has_hardware_render_device,
@@ -572,25 +553,6 @@ fn apply_linux_webkit_rendering_workarounds() {
         if let Some(value) = linux_webkit_environment_override(std::env::var_os(key).as_deref(), value) {
             std::env::set_var(key, value);
         }
-    }
-    if let Some(gdk_backend) = linux_appimage_wayland_backend_override(
-        std::env::var_os("APPIMAGE").as_deref(),
-        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
-        std::env::var_os("GDK_BACKEND").as_deref(),
-    ) {
-        std::env::set_var("GDK_BACKEND", gdk_backend);
-    }
-    if let Some(gtk_im_module_file) = linux_appimage_system_gtk_immodules_cache(
-        std::env::var_os("APPIMAGE").as_deref(),
-        std::env::var_os("APPDIR").as_deref(),
-        std::env::var_os("GTK_IM_MODULE").as_deref(),
-        std::env::var_os("GTK_IM_MODULE_FILE").as_deref(),
-        linux_system_gtk3_immodules_cache_path(),
-    ) {
-        // linuxdeploy-plugin-gtk points GTK_IM_MODULE_FILE at the bundled
-        // cache. That hides host IM modules such as fcitx5/ibus, so prefer the
-        // host GTK cache when the user has configured a GTK input method.
-        std::env::set_var("GTK_IM_MODULE_FILE", gtk_im_module_file);
     }
 }
 
@@ -724,10 +686,12 @@ fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_connection_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_connection_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-connection-links", links);
     }
-    let _ = app.emit("dbx-open-connection-links", links);
     show_main_window(app);
 }
 
@@ -735,23 +699,42 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_ai_config_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_ai_config_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-ai-config-links", links);
     }
-    let _ = app.emit("dbx-open-ai-config-links", links);
+    show_main_window(app);
+}
+
+fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
+    if links.is_empty() {
+        return;
+    }
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_plugin_install_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-plugin-install-links", links);
+    }
     show_main_window(app);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocaleFamily {
+    Azerbaijani,
     English,
     SimplifiedChinese,
     TraditionalChinese,
     Japanese,
     Korean,
     Spanish,
+    Indonesian,
     Italian,
     Portuguese,
+    Russian,
+    Turkish,
 }
 
 // Mirrors the frontend language mapping in apps/desktop/src/i18n/index.ts
@@ -773,12 +756,20 @@ fn locale_family(locale: &str) -> LocaleFamily {
         LocaleFamily::Japanese
     } else if is_language("ko") {
         LocaleFamily::Korean
+    } else if is_language("az") {
+        LocaleFamily::Azerbaijani
     } else if is_language("es") {
         LocaleFamily::Spanish
+    } else if is_language("id") {
+        LocaleFamily::Indonesian
+    } else if is_language("tr") {
+        LocaleFamily::Turkish
     } else if is_language("it") {
         LocaleFamily::Italian
     } else if is_language("pt") {
         LocaleFamily::Portuguese
+    } else if is_language("ru") {
+        LocaleFamily::Russian
     } else {
         LocaleFamily::English
     }
@@ -790,9 +781,13 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
         LocaleFamily::TraditionalChinese => ("顯示 DBX", "退出 DBX"),
         LocaleFamily::Japanese => ("DBXを表示", "DBXを終了"),
         LocaleFamily::Korean => ("DBX 표시", "DBX 종료"),
+        LocaleFamily::Azerbaijani => ("DBX-i göstər", "DBX-dən çıx"),
         LocaleFamily::Spanish => ("Mostrar DBX", "Salir de DBX"),
+        LocaleFamily::Indonesian => ("Tampilkan DBX", "Keluar dari DBX"),
         LocaleFamily::Italian => ("Mostra DBX", "Esci da DBX"),
+        LocaleFamily::Turkish => ("DBX'i Göster", "DBX'ten Çık"),
         LocaleFamily::Portuguese => ("Mostrar DBX", "Sair do DBX"),
+        LocaleFamily::Russian => ("Показать DBX", "Выйти из DBX"),
         LocaleFamily::English => ("Show DBX", "Quit DBX"),
     }
 }
@@ -805,10 +800,32 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
         LocaleFamily::TraditionalChinese => "複製支援資訊",
         LocaleFamily::Japanese => "サポート情報をコピー",
         LocaleFamily::Korean => "지원 정보 복사",
+        LocaleFamily::Azerbaijani => "Dəstək məlumatlarını kopyala",
         LocaleFamily::Spanish => "Copiar información",
+        LocaleFamily::Indonesian => "Salin Info Dukungan",
         LocaleFamily::Italian => "Copia informazioni",
+        LocaleFamily::Turkish => "Destek bilgilerini kopyala",
         LocaleFamily::Portuguese => "Copiar informações",
+        LocaleFamily::Russian => "Копировать сведения о поддержке",
         LocaleFamily::English => "Copy Support Info",
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn app_menu_close_tab_label(locale: &str) -> &'static str {
+    match locale_family(locale) {
+        LocaleFamily::SimplifiedChinese => "关闭标签页",
+        LocaleFamily::TraditionalChinese => "關閉分頁",
+        LocaleFamily::Japanese => "タブを閉じる",
+        LocaleFamily::Korean => "탭 닫기",
+        LocaleFamily::Azerbaijani => "Vərəqi bağla",
+        LocaleFamily::Spanish => "Cerrar pestaña",
+        LocaleFamily::Indonesian => "Tutup Tab",
+        LocaleFamily::Italian => "Chiudi scheda",
+        LocaleFamily::Turkish => "Sekmeyi kapat",
+        LocaleFamily::Portuguese => "Fechar aba",
+        LocaleFamily::Russian => "Закрыть вкладку",
+        LocaleFamily::English => "Close Tab",
     }
 }
 
@@ -818,9 +835,13 @@ fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
         LocaleFamily::SimplifiedChinese | LocaleFamily::TraditionalChinese => format!("退出 {app_name}"),
         LocaleFamily::Japanese => format!("{app_name}を終了"),
         LocaleFamily::Korean => format!("{app_name} 종료"),
+        LocaleFamily::Azerbaijani => format!("{app_name}-dən çıx"),
         LocaleFamily::Spanish => format!("Salir de {app_name}"),
+        LocaleFamily::Indonesian => format!("Keluar dari {app_name}"),
         LocaleFamily::Italian => format!("Esci da {app_name}"),
+        LocaleFamily::Turkish => format!("{app_name} Uygulamasından Çık"),
         LocaleFamily::Portuguese => format!("Sair do {app_name}"),
+        LocaleFamily::Russian => format!("Выйти из {app_name}"),
         LocaleFamily::English => format!("Quit {app_name}"),
     }
 }
@@ -1003,21 +1024,19 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_system_gtk_immodules_cache,
-        linux_appimage_wayland_backend_override, linux_drm_driver_is_software_only,
+        app_menu_close_tab_label, app_menu_copy_support_info_label, app_menu_quit_label,
+        linux_appimage_requires_dmabuf_workaround, linux_drm_driver_is_software_only,
         linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
         linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
-        LinuxNvidiaDriver,
+        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_before_exit,
+        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
-
-    const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
 
     #[test]
     fn tray_menu_labels_follow_locale() {
@@ -1030,9 +1049,13 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("zh-MO"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("ja-JP"), ("DBXを表示", "DBXを終了"));
         assert_eq!(tray_menu_labels_for_locale("ko-KR"), ("DBX 표시", "DBX 종료"));
+        assert_eq!(tray_menu_labels_for_locale("az-AZ"), ("DBX-i göstər", "DBX-dən çıx"));
         assert_eq!(tray_menu_labels_for_locale("es-ES"), ("Mostrar DBX", "Salir de DBX"));
+        assert_eq!(tray_menu_labels_for_locale("id-ID"), ("Tampilkan DBX", "Keluar dari DBX"));
         assert_eq!(tray_menu_labels_for_locale("it-IT"), ("Mostra DBX", "Esci da DBX"));
         assert_eq!(tray_menu_labels_for_locale("pt-BR"), ("Mostrar DBX", "Sair do DBX"));
+        assert_eq!(tray_menu_labels_for_locale("tr-TR"), ("DBX'i Göster", "DBX'ten Çık"));
+        assert_eq!(tray_menu_labels_for_locale("ru-RU"), ("Показать DBX", "Выйти из DBX"));
         assert_eq!(tray_menu_labels_for_locale("en-US"), ("Show DBX", "Quit DBX"));
         // Unknown and empty locales fall back to English; "ita" must not match "it".
         assert_eq!(tray_menu_labels_for_locale("ita"), ("Show DBX", "Quit DBX"));
@@ -1045,12 +1068,24 @@ mod tests {
         assert_eq!(app_menu_quit_label("zh-TW", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("ja-JP", "DBX"), "DBXを終了");
         assert_eq!(app_menu_quit_label("ko-KR", "DBX"), "DBX 종료");
+        assert_eq!(app_menu_quit_label("tr-TR", "DBX"), "DBX Uygulamasından Çık");
+        assert_eq!(app_menu_quit_label("ru-RU", "DBX"), "Выйти из DBX");
+        assert_eq!(app_menu_quit_label("az-AZ", "DBX"), "DBX-dən çıx");
+        assert_eq!(app_menu_quit_label("id-ID", "DBX"), "Keluar dari DBX");
         assert_eq!(app_menu_quit_label("en-US", "DBX"), "Quit DBX");
         assert_eq!(app_menu_quit_label("", "DBX"), "Quit DBX");
         assert_eq!(app_menu_copy_support_info_label("zh-CN"), "复制支持信息");
         assert_eq!(app_menu_copy_support_info_label("zh-TW"), "複製支援資訊");
         assert_eq!(app_menu_copy_support_info_label("ko-KR"), "지원 정보 복사");
+        assert_eq!(app_menu_copy_support_info_label("tr-TR"), "Destek bilgilerini kopyala");
+        assert_eq!(app_menu_copy_support_info_label("ru-RU"), "Копировать сведения о поддержке");
+        assert_eq!(app_menu_copy_support_info_label("az-AZ"), "Dəstək məlumatlarını kopyala");
+        assert_eq!(app_menu_copy_support_info_label("id-ID"), "Salin Info Dukungan");
         assert_eq!(app_menu_copy_support_info_label("en-US"), "Copy Support Info");
+        assert_eq!(app_menu_close_tab_label("zh-CN"), "关闭标签页");
+        assert_eq!(app_menu_close_tab_label("zh-TW"), "關閉分頁");
+        assert_eq!(app_menu_close_tab_label("ja-JP"), "タブを閉じる");
+        assert_eq!(app_menu_close_tab_label("en-US"), "Close Tab");
     }
 
     #[test]
@@ -1062,6 +1097,13 @@ mod tests {
     #[test]
     fn does_not_hide_window_on_close_for_other_platforms() {
         assert!(!should_hide_window_on_close("linux"));
+    }
+
+    #[test]
+    fn hides_window_before_exit_only_on_macos() {
+        assert!(should_hide_window_before_exit("macos"));
+        assert!(!should_hide_window_before_exit("windows"));
+        assert!(!should_hide_window_before_exit("linux"));
     }
 
     #[test]
@@ -1320,13 +1362,20 @@ mod tests {
     }
 
     #[test]
+    fn enables_appimage_dmabuf_workaround_only_for_real_appimage_values() {
+        assert!(linux_appimage_requires_dmabuf_workaround(Some(OsStr::new("/opt/DBX.AppImage"))));
+        assert!(!linux_appimage_requires_dmabuf_workaround(Some(OsStr::new(""))));
+        assert!(!linux_appimage_requires_dmabuf_workaround(None));
+    }
+
+    #[test]
     fn disables_linux_webkit_dmabuf_only_for_strix_halo_on_native_wayland() {
         let strix_halo = drm_pci_render_device("/dev/dri/renderD128", "amdgpu", true, 0x1002, 0x1586);
         let mut strix_halo_without_driver = strix_halo.clone();
         strix_halo_without_driver.driver = None;
         let adjacent_amd = drm_pci_render_device("/dev/dri/renderD128", "amdgpu", true, 0x1002, 0x1587);
         let native_wayland =
-            linux_uses_native_wayland(None, Some(OsStr::new("wayland-0")), Some(OsStr::new("wayland")), None);
+            linux_uses_native_wayland(Some(OsStr::new("wayland-0")), Some(OsStr::new("wayland")), None);
         assert!(native_wayland);
         assert_eq!(
             linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, true, Some(&strix_halo), native_wayland),
@@ -1348,14 +1397,13 @@ mod tests {
 
         for native_wayland in [
             linux_uses_native_wayland(
-                None,
                 Some(OsStr::new("wayland-0")),
                 Some(OsStr::new("wayland")),
                 Some(OsStr::new("x11")),
             ),
-            linux_uses_native_wayland(None, None, Some(OsStr::new("wayland")), None),
-            linux_uses_native_wayland(None, Some(OsStr::new("wayland-0")), None, None),
-            linux_uses_native_wayland(None, Some(OsStr::new("wayland-0")), Some(OsStr::new("x11")), None),
+            linux_uses_native_wayland(None, Some(OsStr::new("wayland")), None),
+            linux_uses_native_wayland(Some(OsStr::new("wayland-0")), None, None),
+            linux_uses_native_wayland(Some(OsStr::new("wayland-0")), Some(OsStr::new("x11")), None),
         ] {
             assert!(!native_wayland);
             assert_eq!(
@@ -1386,14 +1434,13 @@ mod tests {
     }
 
     #[test]
-    fn appimage_linux_webkit_quirk_respects_x11_first_and_explicit_wayland() {
-        let appimage = Some(OsStr::new("/opt/DBX.AppImage"));
+    fn linux_webkit_quirk_respects_explicit_gdk_backend() {
         let display = Some(OsStr::new("wayland-0"));
         let session = Some(OsStr::new("wayland"));
 
-        assert!(!linux_uses_native_wayland(appimage, display, session, None));
-        assert!(linux_uses_native_wayland(appimage, display, session, Some(OsStr::new("wayland"))));
-        assert!(!linux_uses_native_wayland(appimage, display, session, Some(OsStr::new("x11,wayland,*"))));
+        assert!(linux_uses_native_wayland(display, session, None));
+        assert!(linux_uses_native_wayland(display, session, Some(OsStr::new("wayland"))));
+        assert!(!linux_uses_native_wayland(display, session, Some(OsStr::new("x11,wayland,*"))));
     }
 
     #[test]
@@ -1415,104 +1462,25 @@ mod tests {
         assert!(!linux_drm_driver_is_software_only(Some("i915")));
         assert!(!linux_drm_driver_is_software_only(Some("nouveau")));
     }
+}
 
-    #[test]
-    fn prefers_x11_for_appimage_wayland_when_backend_is_not_user_configured() {
-        assert_eq!(
-            linux_appimage_wayland_backend_override(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("wayland-0")),
-                None
-            ),
-            Some("x11,wayland,*")
-        );
-        assert_eq!(
-            linux_appimage_wayland_backend_override(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("wayland-0")),
-                Some(OsStr::new("wayland"))
-            ),
-            None
-        );
-        assert_eq!(linux_appimage_wayland_backend_override(Some(OsStr::new("/tmp/DBX.AppImage")), None, None), None);
-        assert_eq!(linux_appimage_wayland_backend_override(None, Some(OsStr::new("wayland-0")), None), None);
-    }
-
-    #[test]
-    fn prefers_system_gtk_immodules_cache_for_appimage_input_methods() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            Some(TEST_GTK3_IMMODULES_CACHE)
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("ibus")),
-                None,
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            Some(TEST_GTK3_IMMODULES_CACHE)
-        );
-    }
-
-    #[test]
-    fn preserves_external_gtk_immodules_cache_overrides() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/opt/custom/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn skips_system_gtk_immodules_cache_without_required_context() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                None,
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                None,
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                None,
-            ),
-            None
-        );
-    }
+fn route_external_commands(
+    main_handler: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    dbx_tauri_consul::route(dbx_tauri_schema::route(main_handler))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Metadata/completion command chains nest very large async futures and can
+    // exhaust tokio's default 2 MiB worker stack, which aborts the process with
+    // STATUS_STACK_OVERFLOW. Share the roomier stack the backup worker and Web
+    // server runtimes use as well.
+    let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
+    let runtime_handle = runtime.handle().clone();
+    let _runtime = Box::leak(Box::new(runtime));
+    tauri::async_runtime::set(runtime_handle);
+
     startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
     append_startup_probe("runtime prerequisites configured");
@@ -1525,7 +1493,10 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        .plugin(tauri_plugin_fs::init())
+        // Plugin workbench sandbox documents lazy-load their code-split chunks
+        // through this scheme; see plugin_ui_protocol.rs.
+        .register_asynchronous_uri_scheme_protocol(plugin_ui_protocol::PLUGIN_UI_SCHEME, plugin_ui_protocol::handle);
 
     let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
@@ -1534,6 +1505,8 @@ pub fn run() {
             open_connection_deep_links(app, links);
             let ai_config_links = commands::deep_link::ai_config_deep_links_from_args(args.clone());
             open_ai_config_deep_links(app, ai_config_links);
+            let plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(args.clone());
+            open_plugin_install_deep_links(app, plugin_install_links);
 
             let paths = commands::external_sql::sql_file_paths_from_args(args.clone(), std::path::Path::new(&cwd));
             if !paths.is_empty() {
@@ -1586,11 +1559,16 @@ pub fn run() {
             if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
                 log::warn!("Failed to copy support info from app menu: {err}");
             }
+        } else if event.id() == APP_MENU_CLOSE_TAB_ID {
+            let _ = app.emit(APP_CLOSE_ACTIVE_TAB_EVENT, ());
         }
     });
 
     builder
         .manage(CloseBehaviorState::new())
+        .manage(commands::plugin_file::PluginFileState::new())
+        .manage(commands::plugin_media::PluginMediaState::new())
+        .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
@@ -1631,15 +1609,19 @@ pub fn run() {
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let s = Storage::open(&db_path).await.expect("Failed to open storage");
+                let s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
                 append_startup_probe(format!("storage opened in {:?}", t.elapsed()));
                 let t2 = Instant::now();
-                s.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
-                eprintln!("[STARTUP]   migrate_from_json in {:?}", t2.elapsed());
-                append_startup_probe(format!("json migration completed in {:?}", t2.elapsed()));
+                eprintln!("[STARTUP]   migration wizard deferred in {:?}", t2.elapsed());
+                append_startup_probe(format!("migration deferred to security wizard in {:?}", t2.elapsed()));
                 s
             });
+            let migration_ready = tauri::async_runtime::block_on(storage.inspect_data_migration())
+                .map(|status| status.is_ready())
+                .unwrap_or(false);
+            let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
+            app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
@@ -1707,6 +1689,7 @@ pub fn run() {
             } else {
                 AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION"))
             };
+            dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
             let oidc_app_handle = app.handle().clone();
@@ -1716,8 +1699,37 @@ pub fn run() {
                     .open_url(url, None::<&str>)
                     .map_err(|err| format!("Failed to open the system browser: {err}"))
             }));
+            let sf_app_handle = app.handle().clone();
+            state.set_salesforce_browser_opener(Arc::new(move |url| {
+                sf_app_handle
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|err| format!("Failed to open the system browser: {err}"))
+            }));
             let state = Arc::new(state);
             app.manage(state.clone());
+            commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
+            commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
+            let backups = tauri::async_runtime::block_on(async {
+                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone())
+            });
+            match backups {
+                Ok(backups) => {
+                    if let Err(error) = backups.resume() {
+                        log::error!("[database-backup] background registration failed: {error}");
+                    }
+                    app.manage(backups);
+                }
+                Err(error) => log::error!("[database-backup] worker startup failed: {error}"),
+            }
+            let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
+            app.manage(mcp_http_server.clone());
+            let mcp_http_state = state.clone();
+            let mcp_gate = migration_gate.clone();
+            tauri::async_runtime::spawn(async move {
+                mcp_gate.wait().await;
+                commands::mcp_http_server::start_if_enabled(mcp_http_state, mcp_http_server).await;
+            });
             app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
@@ -1738,9 +1750,14 @@ pub fn run() {
             open_connection_deep_links(app.handle(), startup_links);
             let startup_ai_config_links = commands::deep_link::ai_config_deep_links_from_args(&startup_args);
             open_ai_config_deep_links(app.handle(), startup_ai_config_links);
+            let startup_plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(&startup_args);
+            open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
 
             let app_handle = app.handle().clone();
-            commands::mcp_bridge::start(app_handle, state, data_dir);
+            tauri::async_runtime::spawn(async move {
+                migration_gate.wait().await;
+                commands::mcp_bridge::start(app_handle, state, data_dir);
+            });
             eprintln!("[STARTUP] setup complete in {:?} (total {:?})", setup_start.elapsed(), startup_begin.elapsed());
             append_startup_probe(format!(
                 "setup tasks complete in {:?} total {:?}",
@@ -1773,7 +1790,48 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Anchor the plugin-file drop consent on the Rust side: paths are
+            // registered for the webview that physically received the drop,
+            // and plugin_file_open_dropped consumes them there. Folders are
+            // granted as themselves and expand to their contained files at
+            // open time. Renderer-side drop events stay display-only; they
+            // cannot mint file access.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let dropped: Vec<String> = paths
+                    .iter()
+                    .filter(|path| path.is_file() || path.is_dir())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                if !dropped.is_empty() {
+                    if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
+                        state.register_dropped_paths(window.label(), dropped);
+                    }
+                }
+                return;
+            }
+            if let tauri::WindowEvent::Destroyed = event {
+                // A webview that no longer exists must not leave drop grants
+                // behind for a future renderer to claim.
+                if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
+                    state.clear_dropped_paths(window.label());
+                }
+                if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
+                    let _ = window.emit("dbx:detached-tab-lost", serde_json::json!({ "tabId": tab_id }));
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
+                    if commands::app_settings::take_approved_detached_window_close(window.label()) {
+                        return;
+                    }
+                    api.prevent_close();
+                    // Broadcast with the tabId payload: JS listeners registered
+                    // with the default `listen()` target receive events emitted
+                    // to any window, so the frontend must filter by tabId.
+                    let _ = window.emit("dbx:detached-tab-close-requested", serde_json::json!({ "tabId": tab_id }));
+                    return;
+                }
                 if !should_hide_window_on_close(std::env::consts::OS) {
                     return;
                 }
@@ -1787,11 +1845,15 @@ pub fn run() {
                 request_app_close(app, "settings");
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(migration_gate::guard_handler(route_external_commands(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
             commands::ai::ai_agent_stream,
             commands::ai::ai_cancel_stream,
+            commands::ai::ai_resolve_tool_approval,
+            commands::ai::get_ai_plugin_tool_plugins,
+            commands::ai::set_ai_plugin_tool_plugin_enabled,
+            commands::ai::preview_plugin_ai_tools,
             commands::ai::ai_test_connection,
             commands::ai::ai_list_models,
             commands::ai::ai_resolve_model_effort,
@@ -1804,6 +1866,9 @@ pub fn run() {
             commands::ai::save_ai_conversation,
             commands::ai::load_ai_conversations,
             commands::ai::delete_ai_conversation,
+            commands::ai::save_ai_run,
+            commands::ai::save_ai_run_state,
+            commands::ai::load_ai_runs,
             commands::ai_multi_config::save_ai_configs,
             commands::ai_multi_config::load_ai_configs,
             commands::ai_multi_config::set_default_ai_config,
@@ -1814,12 +1879,20 @@ pub fn run() {
             commands::prompt_template::delete_prompt_template,
             commands::prompt_template::get_ai_global_custom_instructions,
             commands::prompt_template::set_ai_global_custom_instructions,
+            commands::user_skills::list_user_skills,
+            commands::user_skills::read_user_skills,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
             commands::app_settings::load_max_agent_turns,
             commands::app_settings::save_max_agent_turns,
+            commands::app_settings::load_history_retention_limit,
+            commands::app_settings::save_history_retention_limit,
+            commands::app_settings::load_mcp_history_retention_limit,
+            commands::app_settings::save_mcp_history_retention_limit,
             commands::app_settings::load_max_retries,
             commands::app_settings::save_max_retries,
+            commands::app_settings::load_app_appearance_settings,
+            commands::app_settings::update_app_appearance_settings,
             commands::app_settings::set_app_locale,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,
@@ -1833,17 +1906,37 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::background_image::save_background_image,
+            commands::background_image::clear_background_image,
+            commands::background_image::read_background_image,
+            commands::background_image::check_background_image,
+            commands::mcp_http_server::load_mcp_http_server_settings,
+            commands::mcp_http_server::save_mcp_http_server_settings,
+            commands::mcp_http_server::mcp_http_server_status,
+            commands::mcp_http_server::rotate_mcp_http_server_token,
             commands::app_settings::load_editor_settings,
             commands::app_settings::save_editor_settings,
+            commands::app_settings::load_global_search_settings,
+            commands::app_settings::save_global_search_settings,
             commands::app_settings::load_open_tabs_state,
             commands::app_settings::save_open_tabs_state,
+            commands::app_settings::save_detached_tab_handoff,
+            commands::app_settings::load_detached_tab_handoff,
+            commands::app_settings::list_detached_tab_handoffs,
+            commands::app_settings::delete_detached_tab_handoff,
+            commands::app_settings::approve_detached_window_close,
             commands::app_settings::load_saved_sql_editor_positions,
             commands::app_settings::save_saved_sql_editor_positions,
             commands::app_settings::load_transfer_task_library,
             commands::app_settings::save_transfer_task_library,
             commands::app_settings::load_native_debug_logs,
+            commands::diagnostics::get_process_memory_info,
             commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,
+            commands::cloud_sync::migration_status,
+            commands::cloud_sync::migration_start,
+            commands::cloud_sync::migration_retry,
+            commands::cloud_sync::migration_cleanup_backups,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
             commands::cloud_sync::forget_webdav_saved_password,
@@ -1852,6 +1945,8 @@ pub fn run() {
             commands::cloud_sync::forget_webdav_sync_secrets_passphrase,
             commands::cloud_sync::webdav_sync_upload,
             commands::cloud_sync::webdav_sync_download,
+            commands::cloud_sync::webdav_sync_inspect,
+            commands::cloud_sync::cloud_sync_local_catalog,
             commands::cloud_sync::snippet_sync_test,
             commands::cloud_sync::snippet_token_status,
             commands::cloud_sync::save_snippet_saved_token,
@@ -1861,8 +1956,19 @@ pub fn run() {
             commands::cloud_sync::retry_snippet_legacy_cleanup,
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
+            commands::cloud_sync::snippet_sync_inspect,
+            commands::local_backup::local_backup_export,
+            commands::local_backup::local_backup_inspect,
+            commands::local_backup::local_backup_import,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
+            commands::connection::test_ssh_tunnel,
+            commands::salesforce_oauth::salesforce_oauth_browser_authorize,
+            commands::salesforce_oauth::salesforce_oauth_device_start,
+            commands::salesforce_oauth::salesforce_oauth_device_poll,
+            commands::salesforce_oauth::salesforce_oauth_refresh,
+            commands::salesforce_oauth::salesforce_oauth_password_login,
+            commands::salesforce_oauth::salesforce_current_user,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,
@@ -1873,14 +1979,63 @@ pub fn run() {
             commands::connection::clear_all_session_credentials,
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
+            commands::connection::connection_is_open,
+            commands::connection::prewarm_connection,
             commands::connection::connection_identifier_quote,
             commands::connection::connection_database_info,
             commands::connection::save_connection_database_info,
+            commands::connection::unlock_connection_writes,
+            commands::connection::lock_connection_writes,
+            commands::connection::connection_write_unlock_state,
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
             commands::connection::load_sidebar_layout,
+            commands::connection::save_table_vgroups,
+            commands::connection::load_table_vgroups,
+            commands::connection::delete_table_vgroups_for_connection,
+            commands::plugin_file::plugin_file_open_dropped,
+            commands::plugin_file::plugin_file_pick_files,
+            commands::plugin_file::plugin_file_save_as,
+            commands::plugin_file::plugin_file_read,
+            commands::plugin_file::plugin_file_write,
+            commands::plugin_file::plugin_file_close,
+            commands::plugin_media::plugin_media_open,
+            commands::plugin_media::plugin_media_close,
+            commands::plugin_storage::plugin_ui_storage_get,
+            commands::plugin_storage::plugin_ui_storage_set,
+            commands::plugin_storage::plugin_ui_storage_delete,
             commands::plugins::list_plugins,
+            commands::plugins::list_plugin_trusted_keys,
+            commands::plugins::save_plugin_trusted_key,
+            commands::plugins::remove_plugin_trusted_key,
+            commands::plugins::list_plugin_repositories,
+            commands::plugins::save_plugin_repository,
+            commands::plugins::remove_plugin_repository,
+            commands::plugins::fetch_plugin_marketplace_catalogs,
+            commands::plugins::install_marketplace_plugin,
+            commands::plugins::install_plugin_package,
+            commands::plugins::install_plugin_package_from_url,
+            commands::plugins::rollback_plugin,
+            commands::plugins::uninstall_plugin,
+            commands::plugins::activate_plugin,
+            commands::plugins::list_active_plugins,
+            commands::plugins::stop_plugin,
+            commands::plugins::invoke_plugin,
+            commands::plugin_download::download_plugin_file,
+            commands::plugin_download::cancel_plugin_download,
+            commands::plugins::invoke_plugin_connection_action,
+            commands::plugins::notify_plugin,
+            commands::plugins::send_plugin_binary,
+            commands::plugins::list_plugin_filesystem_entries,
+            commands::plugins::read_plugin_filesystem_file,
+            commands::plugins::write_plugin_filesystem_file,
+            commands::plugins::create_plugin_filesystem_directory,
+            commands::plugins::delete_plugin_filesystem_entry,
+            commands::plugins::rename_plugin_filesystem_entry,
+            commands::plugins::read_plugin_ui_entry,
+            commands::plugins::read_plugin_asset,
+            commands::plugins::read_plugin_ui_asset,
             commands::plugins::list_jdbc_drivers,
             commands::plugins::list_jdbc_maven_bundles,
             commands::plugins::list_jdbc_local_bundles,
@@ -1894,48 +2049,6 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin,
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
-            commands::schema::list_databases,
-            commands::schema::list_database_metadata,
-            commands::schema::list_database_storage,
-            commands::schema::get_sqlserver_completion_context,
-            commands::schema::list_doris_catalogs,
-            commands::schema::list_doris_catalog_databases,
-            commands::schema::list_sqlserver_linked_servers,
-            commands::schema::list_sqlserver_linked_server_catalogs,
-            commands::schema::list_sqlserver_linked_server_schemas,
-            commands::schema::list_sqlserver_linked_server_tables,
-            commands::schema::list_tables,
-            commands::schema::get_table_comment,
-            commands::schema::list_objects,
-            commands::schema::list_object_statistics,
-            commands::schema::list_completion_objects,
-            commands::schema::completion_assistant_search,
-            commands::schema::get_object_source,
-            commands::schema::get_event_info,
-            commands::schema::get_custom_type_details,
-            commands::schema::list_schemas,
-            commands::schema::list_schema_infos,
-            commands::schema::list_data_types,
-            commands::schema::get_columns,
-            commands::schema::get_all_columns,
-            commands::schema::get_sqlserver_column_metadata,
-            commands::schema::list_indexes,
-            commands::schema::list_reference_key_columns,
-            commands::schema::list_foreign_keys,
-            commands::schema::list_triggers,
-            commands::schema::list_constraints,
-            commands::schema::list_partitions,
-            commands::schema::get_table_partition_status,
-            commands::schema::list_invalid_indexes,
-            commands::schema::list_subpartitions,
-            commands::schema::get_table_ddl,
-            commands::schema::list_functions,
-            commands::schema::list_sequences,
-            commands::schema::list_rules,
-            commands::schema::list_owners,
-            commands::schema::get_table_owner,
-            commands::schema::list_extensions,
-            commands::schema::list_available_extensions,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,
@@ -1970,6 +2083,11 @@ pub fn run() {
             commands::query::build_sorted_query_sql,
             commands::query::build_explain_sql,
             commands::query::get_explain_info,
+            commands::query::get_plugin_plan_capabilities,
+            commands::query::get_plugin_estimated_plan,
+            commands::query::query_plugin_data,
+            commands::query::get_plugin_data_grants,
+            commands::query::set_plugin_data_grant,
             commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
@@ -2005,12 +2123,15 @@ pub fn run() {
             commands::query::preview_sqlite_table_structure_change,
             commands::query::apply_sqlite_table_structure_change,
             commands::query::build_create_table_sql,
+            commands::query::build_create_partitioned_table_sql,
+            commands::query::build_table_partition_operation_sql,
             commands::query::build_single_column_alter_sql,
             commands::query::analyze_editable_query_editability,
             commands::query::prepare_data_grid_save,
             commands::query::extract_data_grid_selection,
             commands::query::build_data_grid_copy_update_statements,
             commands::query::build_data_grid_copy_insert_statement,
+            commands::query::build_dml_change_preview_sql,
             commands::query::build_data_grid_context_filter_condition,
             commands::query::build_data_grid_column_value_filter_condition,
             commands::query::build_data_grid_column_values_filter_condition,
@@ -2026,6 +2147,7 @@ pub fn run() {
             commands::data_compare::prepare_data_compare_missing_target,
             commands::data_compare::build_data_compare_sync_plan,
             commands::sql_file::preview_sql_file,
+            commands::sql_file::inspect_sql_file_tables,
             commands::sql_file::execute_sql_file,
             commands::sql_file::execute_sql_files,
             commands::sql_file::cancel_sql_file_execution,
@@ -2035,19 +2157,36 @@ pub fn run() {
             commands::external_sql::write_external_sql_file,
             commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
+            commands::list_sql_files::create_sql_file_in_folder,
+            commands::list_sql_files::rename_sql_file_in_folder,
+            commands::list_sql_files::delete_sql_file_in_folder,
+            commands::global_search::global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
             commands::deep_link::pending_open_ai_config_links,
+            commands::deep_link::pending_open_plugin_install_links,
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
             commands::table_import::cancel_table_import,
+            commands::mongodb_import_export::preview_mongodb_import_file,
+            commands::mongodb_import_export::import_mongodb_file,
+            commands::mongodb_import_export::cancel_mongodb_import,
+            commands::mongodb_import_export::export_mongodb_query,
+            commands::mongodb_import_export::cancel_mongodb_export,
+            commands::mongodb_dump::inspect_mongodb_database_dump,
+            commands::mongodb_dump::prepare_mongodb_restore_source,
+            commands::mongodb_dump::release_mongodb_restore_source,
+            commands::mongodb_dump::dump_mongodb_database,
+            commands::mongodb_dump::restore_mongodb_database,
+            commands::mongodb_dump::cancel_mongodb_database_dump,
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
+            commands::redis_cmd::redis_get_raw_value,
             commands::redis_cmd::redis_get_ttl,
             commands::redis_cmd::redis_get_stream_entries,
             commands::redis_cmd::redis_get_stream_groups,
@@ -2058,6 +2197,7 @@ pub fn run() {
             commands::redis_cmd::redis_rename_key,
             commands::redis_cmd::redis_hash_set,
             commands::redis_cmd::redis_hash_del,
+            commands::redis_cmd::redis_hash_field_update,
             commands::redis_cmd::redis_hash_field_set_ttl,
             commands::redis_cmd::redis_hash_field_set_expire_at,
             commands::redis_cmd::redis_list_push,
@@ -2073,7 +2213,10 @@ pub fn run() {
             commands::redis_cmd::redis_check_json_module,
             commands::redis_cmd::redis_set_ttl,
             commands::redis_cmd::redis_set_expire_at,
+            commands::redis_cmd::redis_set_keys_ttl,
+            commands::redis_cmd::redis_set_keys_expire_at,
             commands::redis_cmd::redis_delete_keys,
+            commands::redis_cmd::redis_delete_keys_by_pattern,
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
             commands::redis_cmd::redis_load_more,
@@ -2102,109 +2245,6 @@ pub fn run() {
             commands::zookeeper_cmd::zookeeper_get,
             commands::zookeeper_cmd::zookeeper_put,
             commands::zookeeper_cmd::zookeeper_delete,
-            commands::consul_cmd::consul_capabilities,
-            commands::consul_cmd::consul_txn,
-            commands::consul_cmd::consul_rename_key,
-            commands::consul_cmd::consul_blocking_query,
-            commands::consul_cmd::consul_domain_watch,
-            commands::consul_cmd::consul_cancel_blocking,
-            commands::consul_cmd::consul_watch_start,
-            commands::consul_cmd::consul_list_prefix,
-            commands::consul_cmd::consul_list_recursive,
-            commands::consul_cmd::consul_search,
-            commands::consul_cmd::consul_search_progress,
-            commands::consul_cmd::consul_cancel_search,
-            commands::consul_cmd::consul_export_bundle,
-            commands::consul_cmd::consul_import_preview,
-            commands::consul_cmd::consul_import_execute,
-            commands::consul_cmd::consul_delete_prefix_preview,
-            commands::consul_cmd::consul_delete_prefix_execute,
-            commands::consul_cmd::consul_get,
-            commands::consul_cmd::consul_put,
-            commands::consul_cmd::consul_delete,
-            commands::consul_cmd::consul_prepared_query_list,
-            commands::consul_cmd::consul_prepared_query_read,
-            commands::consul_cmd::consul_prepared_query_create,
-            commands::consul_cmd::consul_prepared_query_update,
-            commands::consul_cmd::consul_prepared_query_delete,
-            commands::consul_cmd::consul_prepared_query_execute,
-            commands::consul_cmd::consul_prepared_query_explain,
-            commands::consul_cmd::consul_event_list,
-            commands::consul_cmd::consul_event_fire,
-            commands::consul_cmd::consul_coordinate_nodes,
-            commands::consul_cmd::consul_operator_read,
-            commands::consul_cmd::consul_snapshot_generate,
-            commands::consul_cmd::consul_snapshot_restore,
-            commands::consul_cmd::consul_autopilot_update,
-            commands::consul_cmd::consul_raft_transfer,
-            commands::consul_cmd::consul_raft_remove,
-            commands::consul_cmd::consul_keyring_write,
-            commands::consul_cmd::consul_license_write,
-            commands::consul_cmd::consul_status_leader,
-            commands::consul_cmd::consul_status_peers,
-            commands::consul_cmd::consul_agent_self,
-            commands::consul_cmd::consul_agent_members,
-            commands::consul_cmd::consul_agent_metrics,
-            commands::consul_cmd::consul_catalog_datacenters,
-            commands::consul_cmd::consul_catalog_nodes,
-            commands::consul_cmd::consul_catalog_services,
-            commands::consul_cmd::consul_catalog_service_nodes,
-            commands::consul_cmd::consul_catalog_node_services,
-            commands::consul_cmd::consul_health_node,
-            commands::consul_cmd::consul_health_checks,
-            commands::consul_cmd::consul_health_service,
-            commands::consul_cmd::consul_health_state,
-            commands::consul_cmd::consul_agent_services,
-            commands::consul_cmd::consul_agent_service,
-            commands::consul_cmd::consul_agent_checks,
-            commands::consul_cmd::consul_agent_register_service,
-            commands::consul_cmd::consul_agent_deregister_service,
-            commands::consul_cmd::consul_agent_service_maintenance,
-            commands::consul_cmd::consul_agent_register_check,
-            commands::consul_cmd::consul_agent_deregister_check,
-            commands::consul_cmd::consul_agent_update_ttl,
-            commands::consul_cmd::consul_sessions,
-            commands::consul_cmd::consul_node_sessions,
-            commands::consul_cmd::consul_session,
-            commands::consul_cmd::consul_session_keys,
-            commands::consul_cmd::consul_session_destroy_impact,
-            commands::consul_cmd::consul_create_session,
-            commands::consul_cmd::consul_renew_session,
-            commands::consul_cmd::consul_destroy_session,
-            commands::consul_cmd::consul_acquire_lock,
-            commands::consul_cmd::consul_release_lock,
-            commands::consul_cmd::consul_acl_list,
-            commands::consul_cmd::consul_acl_token_self,
-            commands::consul_cmd::consul_acl_token_clone,
-            commands::consul_cmd::consul_acl_get,
-            commands::consul_cmd::consul_acl_apply,
-            commands::consul_cmd::consul_acl_references,
-            commands::consul_cmd::consul_acl_delete,
-            commands::consul_cmd::consul_enterprise_list,
-            commands::consul_cmd::consul_enterprise_get,
-            commands::consul_cmd::consul_enterprise_apply,
-            commands::consul_cmd::consul_enterprise_impact,
-            commands::consul_cmd::consul_enterprise_delete,
-            commands::consul_cmd::consul_mesh_config_list,
-            commands::consul_cmd::consul_mesh_config_get,
-            commands::consul_cmd::consul_mesh_config_apply,
-            commands::consul_cmd::consul_mesh_config_delete,
-            commands::consul_cmd::consul_mesh_intentions_list,
-            commands::consul_cmd::consul_mesh_intention_get,
-            commands::consul_cmd::consul_mesh_intention_get_exact,
-            commands::consul_cmd::consul_mesh_intention_upsert,
-            commands::consul_cmd::consul_mesh_intention_delete,
-            commands::consul_cmd::consul_mesh_intention_delete_exact,
-            commands::consul_cmd::consul_mesh_intention_match,
-            commands::consul_cmd::consul_mesh_intention_check,
-            commands::consul_cmd::consul_mesh_discovery_chain,
-            commands::consul_cmd::consul_mesh_peering_list,
-            commands::consul_cmd::consul_mesh_peering_get,
-            commands::consul_cmd::consul_mesh_peering_generate_token,
-            commands::consul_cmd::consul_mesh_peering_establish,
-            commands::consul_cmd::consul_mesh_peering_delete,
-            commands::consul_cmd::consul_mesh_exported_services_list,
-            commands::consul_cmd::consul_mesh_exported_services_apply,
             commands::nacos_cmd::nacos_test_connection,
             commands::nacos_cmd::nacos_list_namespaces,
             commands::nacos_cmd::nacos_sidebar_snapshot,
@@ -2263,7 +2303,10 @@ pub fn run() {
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
+            background_backup::database_backup_command,
+            background_backup::database_backup_background,
             commands::sqlite_backup::backup_sqlite_database,
+            commands::sqlite_backup::restore_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
             commands::vector_cmd::vector_collection_detail,
@@ -2276,6 +2319,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,
+            commands::docs::docs_collect_snapshot_for_export,
             commands::docs::docs_load_annotations,
             commands::docs::docs_apply_annotations,
             commands::docs::docs_save_annotations,
@@ -2286,6 +2330,8 @@ pub fn run() {
             commands::document_cmd::document_count_documents,
             commands::document_cmd::dynamodb_describe_table,
             commands::document_cmd::elasticsearch_count_documents,
+            commands::document_cmd::elasticsearch_get_index_metadata,
+            commands::document_cmd::elasticsearch_delete_all_documents,
             commands::document_cmd::document_list_gridfs_buckets,
             commands::document_cmd::document_create_gridfs_bucket,
             commands::document_cmd::document_delete_gridfs_bucket,
@@ -2296,6 +2342,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_parse_shell_command,
             commands::mongo_cmd::mongo_find_one,
+            commands::mongo_cmd::mongo_explain_find,
             commands::mongo_cmd::mongo_count_documents,
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_collection_stats,
@@ -2312,6 +2359,8 @@ pub fn run() {
             commands::document_cmd::document_update_document,
             commands::mongo_cmd::mongo_update_document,
             commands::mongo_cmd::mongo_update_documents,
+            commands::mongo_cmd::mongo_replace_document,
+            commands::mongo_cmd::mongo_bulk_write,
             commands::document_cmd::document_delete_document,
             commands::document_cmd::document_save_meilisearch_batch,
             commands::document_cmd::meilisearch_search_documents,
@@ -2321,6 +2370,7 @@ pub fn run() {
             commands::document_cmd::meilisearch_update_index_settings,
             commands::document_cmd::meilisearch_get_index_stats,
             commands::document_cmd::meilisearch_get_index_overview,
+            commands::document_cmd::meilisearch_create_index,
             commands::document_cmd::meilisearch_delete_index,
             commands::document_cmd::meilisearch_delete_all_documents,
             commands::document_cmd::meilisearch_get_system_overview,
@@ -2368,6 +2418,8 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_topics,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_topics_page,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_topic,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_delete_topic,
@@ -2379,6 +2431,8 @@ pub fn run() {
             commands::mq_cmd::mq_get_topic_internal_stats,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_exchanges,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_exchanges_page,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_exchange,
             #[cfg(feature = "mq-admin")]
@@ -2518,13 +2572,19 @@ pub fn run() {
             commands::history::search_history,
             commands::history::load_history_connection_options,
             commands::history::clear_history,
+            commands::history::clear_history_by_source,
+            commands::history::cleanup_mcp_history_retention,
             commands::history::delete_history_entry,
             commands::mcp::check_mcp_server_status,
             commands::mcp::install_mcp_server,
+            commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
+            commands::mcp::uninstall_npm_mcp_server,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
             commands::update::get_system_proxy_url,
+            commands::update::get_downloaded_update,
+            commands::update::discard_downloaded_update,
             commands::update::download_update,
             commands::update::cancel_update_download,
             commands::update::install_downloaded_update,
@@ -2534,10 +2594,14 @@ pub fn run() {
             commands::database_export::begin_database_backup_snapshot,
             commands::database_export::export_database_sql,
             commands::database_export::cancel_database_export,
+            commands::database_export::clear_database_export_cancellation,
+            commands::database_export::database_export_destination_needs_confirmation,
             commands::database_export::record_database_export_destination,
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,
             commands::query_result_export::start_query_result_export,
+            commands::query_result_export::create_query_result_temp_file,
+            commands::query_result_export::open_query_result_temp_file,
             commands::query_result_export::cancel_query_result_export,
             commands::csv_export::export_query_result_csv,
             commands::csv_export::export_table_data_csv,
@@ -2545,6 +2609,7 @@ pub fn run() {
             commands::xlsx_export::export_query_results_xlsx,
             commands::text_export::export_query_result_json,
             commands::text_export::export_query_result_markdown,
+            commands::text_export::export_query_result_html,
             commands::agents::list_installed_agents,
             commands::agents::list_installed_agents_local,
             commands::agents::is_agent_installed,
@@ -2572,13 +2637,14 @@ pub fn run() {
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
             commands::ssh_config::list_ssh_config_hosts,
+            commands::ssh_keys::list_local_ssh_keys,
             commands::ssh_prompt::ssh_prompt_ready,
             commands::ssh_prompt::ssh_prompt_not_ready,
             commands::ssh_prompt::resolve_ssh_prompt,
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
-        ])
+        ])))
         .build(tauri::generate_context!())
         .inspect(|app| {
             append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));
@@ -2602,7 +2668,18 @@ pub fn run() {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
                 } else {
+                    // Restart exits and the no-frontend native quit bypass
+                    // `complete_app_close`, so hide the window here too; the
+                    // shutdown below gives WindowServer time to remove it.
+                    if should_hide_window_before_exit(std::env::consts::OS) {
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
                     tauri::async_runtime::block_on(async {
+                        if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
+                            backups.shutdown().await;
+                        }
                         if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
                         {
                             server.shutdown(Duration::from_secs(1)).await;
@@ -2633,6 +2710,13 @@ pub fn run() {
                     .filter_map(|url| commands::deep_link::ai_config_deep_link_from_arg(&url))
                     .collect();
                 open_ai_config_deep_links(app_handle, ai_config_links);
+
+                let plugin_install_links: Vec<String> = urls
+                    .iter()
+                    .map(|url| url.to_string())
+                    .filter_map(|url| commands::deep_link::plugin_install_deep_link_from_arg(&url))
+                    .collect();
+                open_plugin_install_deep_links(app_handle, plugin_install_links);
 
                 let paths: Vec<String> = urls
                     .iter()
@@ -2680,7 +2764,13 @@ pub fn run() {
                     );
                 }
                 let app_handle = app_handle.clone();
+                let migration_gate =
+                    app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
+                    let Some(migration_gate) = migration_gate else {
+                        return;
+                    };
+                    migration_gate.wait().await;
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
@@ -2689,7 +2779,13 @@ pub fn run() {
 
             if let RunEvent::Resumed = &event {
                 let app_handle = app_handle.clone();
+                let migration_gate =
+                    app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
+                    let Some(migration_gate) = migration_gate else {
+                        return;
+                    };
+                    migration_gate.wait().await;
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
