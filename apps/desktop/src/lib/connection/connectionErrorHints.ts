@@ -72,6 +72,11 @@ export function isMysqlMissingPasswordFailure(config: ConnectionConfig, message:
   return /access denied for user[\s\S]*using password:\s*no/i.test(message);
 }
 
+export function isSqliteMissingEncryptionPasswordFailure(config: ConnectionConfig, message: string): boolean {
+  if (config.db_type !== "sqlite" || config.password) return false;
+  return /Selected file is not a valid SQLite database file/i.test(message);
+}
+
 export function isJdbcMissingRuntimeDependencyError(message: string): boolean {
   return /Missing Java class|NoClassDefFoundError|ClassNotFoundException/i.test(message);
 }
@@ -94,8 +99,18 @@ export function appendConnectionErrorHints(config: ConnectionConfig | undefined,
   if (isMysqlMissingPasswordFailure(config, message)) {
     return t("connection.mysqlMissingPasswordHint");
   }
-  if (mysqlTlsMode(config) === "disabled") return message;
+  if (mysqlTlsMode(config) === "disabled") {
+    // 1045 does not distinguish bad credentials from an account requiring SSL.
+    const usedPassword = Boolean(config.password) || /using password:\s*yes\b/i.test(message);
+    if (usedPassword && /\b1045\b/.test(message) && /\b28000\b/.test(message) && /access denied for user/i.test(message)) {
+      return appendHint(message, t("connection.mysqlDisabledTlsAccessDeniedHint"));
+    }
+    return message;
+  }
   if (!isMysqlTlsLikeFailure(message)) return message;
+  if (/ServerDoesNotSupportTls12Or13/i.test(message)) {
+    return appendHint(message, t("connection.mysqlUnsupportedTlsVersionHint"));
+  }
   if (/UnsupportedCertVersion/i.test(message)) {
     return appendHint(message, t("connection.mysqlUnsupportedCertVersionHint"));
   }

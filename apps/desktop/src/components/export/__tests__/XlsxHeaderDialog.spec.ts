@@ -4,6 +4,7 @@ import { createApp, nextTick } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
 import i18n from "@/i18n";
 import XlsxHeaderDialog from "../XlsxHeaderDialog.vue";
+import type { XlsxExportOptions } from "@/lib/export/xlsxHeader";
 
 describe("XlsxHeaderDialog", () => {
   afterEach(() => {
@@ -31,14 +32,14 @@ describe("XlsxHeaderDialog", () => {
     app.unmount();
   });
 
-  it("emits the combined name and comment mode", async () => {
+  it("emits the selected header mode and filter option", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
-    let selectedMode = "";
+    let selectedOptions: { headerMode: string; autoFilter: boolean } | undefined;
     const app = createApp(XlsxHeaderDialog, {
       open: true,
-      onConfirm: (mode: string) => {
-        selectedMode = mode;
+      onConfirm: (options: { headerMode: string; autoFilter: boolean }) => {
+        selectedOptions = options;
       },
     });
     app.use(i18n);
@@ -50,7 +51,30 @@ describe("XlsxHeaderDialog", () => {
     document.querySelector<HTMLButtonElement>("[data-xlsx-header-confirm]")!.click();
     await nextTick();
 
-    expect(selectedMode).toBe("name-comment");
+    expect(selectedOptions).toEqual({ headerMode: "name-comment", autoFilter: false });
+    app.unmount();
+  });
+
+  it("selects queued execution in the existing options confirmation, defaulting to immediate", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let selectedOptions: XlsxExportOptions | undefined;
+    const app = createApp(XlsxHeaderDialog, {
+      open: true,
+      showExecutionMode: true,
+      onConfirm: (options: XlsxExportOptions) => {
+        selectedOptions = options;
+      },
+    });
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+    expect(document.querySelector<HTMLInputElement>('input[value="immediate"]')!.checked).toBe(true);
+    document.querySelector<HTMLInputElement>('input[value="queued"]')!.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-xlsx-header-confirm]")!.click();
+    await nextTick();
+    expect(selectedOptions).toEqual({ headerMode: "name", autoFilter: false, executionMode: "queued" });
     app.unmount();
   });
 });

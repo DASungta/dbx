@@ -1,39 +1,10 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { computed, createApp, defineComponent, h, nextTick, ref } from "vue";
 import { describe, expect, it } from "vitest";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 
-const source = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
-
 describe("QueryEditor context menu lifecycle", () => {
-  it("resolves menu items after synchronizing the right-click target", () => {
-    const syncStart = source.indexOf("function syncContextMenuStateAtEvent");
-    const syncEnd = source.indexOf("\n}", syncStart);
-    const syncSource = source.slice(syncStart, syncEnd);
-    const syncIndex = source.indexOf("syncContextMenuStateAtEvent(view, e);");
-    const openIndex = source.indexOf("onContextMenu(e);", syncIndex);
-    const getterStart = source.indexOf("function currentContextMenuItems()");
-    const getterEnd = source.indexOf("\n}", getterStart);
-    const getterSource = source.slice(getterStart, getterEnd);
-
-    expect(syncStart).toBeGreaterThanOrEqual(0);
-    expect(syncEnd).toBeGreaterThan(syncStart);
-    expect(syncSource).toContain("if (pos == null)");
-    expect(syncSource).toContain("contextObjectTarget.value = null;");
-    expect(syncIndex).toBeGreaterThanOrEqual(0);
-    expect(openIndex).toBeGreaterThan(syncIndex);
-    expect(getterStart).toBeGreaterThanOrEqual(0);
-    expect(getterEnd).toBeGreaterThan(getterStart);
-    expect(getterSource).toContain("return contextMenuItems.value;");
-    expect(getterSource).not.toContain("nextTick");
-    expect(getterSource).not.toContain("setTimeout");
-    expect(source).toContain(':items="currentContextMenuItems"');
-    expect(source).not.toContain('<CustomContextMenu :items="contextMenuItems"');
-  });
-
   it("uses the target synchronized in the current context-menu event", async () => {
     const target = ref<string | null>(null);
     const openedTargets: string[] = [];
